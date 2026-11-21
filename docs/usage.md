@@ -25,15 +25,18 @@ make generate \
   SEED=2 OUT=panda.mp4
 ```
 
-`LORA` runs a few-step LoRA with the settings on its page in place of the FastH3 patch: `pdmd` for
+`LORA` runs a few-step adapter with the settings on its page in place of the FastH3 patch. Use `pdmd` for
 [PDMD](pdmd.md), `dmad` for [DMAD](dmad.md), `turbo` for the
 [lightx2v Turbo LoRA](lightx2v-turbo.md) and `taomate` for [TaoMate-H3](taomate.md).
-`make download-models` with the same `LORA` also downloads that LoRA:
+`make download-models` with the same `LORA` also downloads that adapter.
 
 ```sh
 make download-models LORA=pdmd
 make generate LORA=pdmd
 ```
+
+For [pi-H3](pih3.md), use `LORA=pih3` for video VAE output or `LORA=pih3-dwd` for DWD on one
+local CUDA device. Set `PIH3_STEPS=4` on both commands to use the 4-step adapter.
 
 `OUTPUT_OPTIONS` goes last on the line, so `make generate OUTPUT_OPTIONS=--ffmpeg` writes the MP4
 through ffmpeg on a GPU or in a container without NVENC.
@@ -62,10 +65,11 @@ through ffmpeg on a GPU or in a container without NVENC.
 - `--reference-video FILE` (default none, repeatable): An H.264 MP4 the prompt refers to as
   `<Video 1>`, `<Video 2>` and so on, its frames decoded with NVDEC or VideoToolbox and its soundtrack taken as the
   `<Audio j>` before it. Switches the default DiT to the ref2va one as well.
-- `--steps N` (default 20): Model evaluations. The released checkpoint is guidance-distilled, so
-  there is no CFG.
-- `--schedule uniform|taomate` (default `uniform`): `taomate` runs the three steps the TaoMate-H3
+- `--steps N` sets the number of model evaluations. It defaults to 20 for `uniform` and 2 for
+  `pih3`. The released checkpoint is guidance-distilled, so there is no CFG.
+- `--schedule uniform|taomate|pih3` (default `uniform`): `taomate` runs the three steps the TaoMate-H3
   LoRA was distilled for, states 0, 16, 33 and 49 of the 50-step schedule, in place of `--steps`.
+  `pih3` runs the [pi-H3](pih3.md) schedule with the matching 2- or 4-step patch.
 - `--sampler euler|renoise` (default `euler`): How a step moves to the next sigma. `euler` is the
   official pipeline's Euler step. `renoise` takes the clean latent the step predicts and noises it
   again to the next sigma with fresh noise from the seed, the rule DMD-style students such as
@@ -96,6 +100,9 @@ through ffmpeg on a GPU or in a container without NVENC.
   `--veda-reference-sparsity 0` attends to every keyframe and reference token.
 - `--patch FILE` (default none): A patch for the DiT, such as the FastH3 patch, applied before a
   LoRA.
+- `--dwd FILE` applies the converted [pi-H3 DWD](pih3.md#dwd-on-cuda) patch and uses its pixel
+  refiner for video output. It runs on one local CUDA device with `--schedule pih3` and the step
+  count of the adapter. It takes the place of `--patch`.
 - `--lora FILE`, `--lora-strength X` (default none, 1.0): A ComfyUI LoRA for the DiT.
 - `--lora-mode adapter|merge` (default `adapter`): `adapter` runs the LoRA next to the INT8 weights,
   its down projection on the layer's INT8 input. `merge` adds it into the INT8 weights at load time,

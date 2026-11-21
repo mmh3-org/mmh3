@@ -4,6 +4,26 @@ Development tools that build model files for mmh3. Generating video does not nee
 lists its Python dependencies in its header, and `uv run` installs them into a cached environment,
 so no other setup is needed.
 
+## pih3_patch.py
+
+Converts the [pi-H3 release adapters](https://huggingface.co/Lakonik/pi-H3/tree/4a864589b0fac3d14768f932c930c4dcf1a17b56)
+for the pruned INT8 ConvRot FL2VA DiT. Use it to rebuild any of the published patches from the
+original adapters. The model downloader fetches the converted patches.
+[yniw/MiniMax-H3-mmh3](https://huggingface.co/yniw/MiniMax-H3-mmh3)
+
+```sh
+uv run tools/models/pih3_patch.py \
+  --adapter /path/to/pi_h3_2step_dwd_adapter_int8_convrot.safetensors \
+  --base models/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors \
+  --out models/patches/minimax_h3_pih3_2step_dwd.safetensors
+```
+
+The video VAE variant reads the Diffusers adapter. It preserves the 150 rank-64 LoRAs and 57 tensor
+replacements, rounds the LoRA factors to BF16 and orders the MLP rows for mmh3. The DWD variant
+reads the published `*_int8_convrot.safetensors` adapter and keeps its pixel refiner in the same
+file as the DiT patch. Use `--patch` for video VAE output and `--dwd` for DWD. See
+[pi-H3](../../docs/pih3.md) for generation settings.
+
 ## fasth3_vsa_patch.py
 
 Builds a patch that turns the pruned INT8 ConvRot FL2VA DiT, which mmh3 loads by default, into

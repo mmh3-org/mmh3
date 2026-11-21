@@ -30,6 +30,22 @@ make generate
 `make download-models` downloads the models into `models`, and `make generate` writes a video with
 audio from a sample prompt to `out.mp4`. See [Usage](docs/usage.md) for the other settings.
 
+### pi-H3 video on CUDA
+
+On a single CUDA GPU, the pi-H3 DWD adapter produces RGB from the final DiT features. These
+commands download the converted 2-step patch and run it.
+
+```sh
+make download-models LORA=pih3-dwd
+make generate LORA=pih3-dwd
+```
+
+Set `PIH3_STEPS=4` on both commands for the 4-step adapter. Use `LORA=pih3` for video VAE output.
+The DWD download includes the models for text-to-video with audio. First- and last-frame
+conditioning also uses the video VAE encoder. See [pi-H3](docs/pih3.md) for model files and commands.
+
+### Images
+
 These commands download MiniMax H3 Image and write an image to `out.png`. See
 [Image](docs/image.md) for its settings and for editing images.
 
@@ -63,7 +79,7 @@ model files. [Performance and accuracy](docs/performance.md) has the times of ea
 `make generate` uses FastVideo's 4-step [FastH3](docs/fasth3.md) as a patch on the base DiT, with
 its video sparse attention, INT8/FP8 attention and the INT8 video VAE, and writes MP4 with NVENC
 H.264 and AAC. Compared with mmh3's defaults, these can change image details and the composition.
-mmh3 also runs four other few-step models with the settings on their pages.
+The other few-step presets and their settings are linked in the table.
 
 On a DGX Spark, a complete generation took:
 
@@ -74,8 +90,12 @@ On a DGX Spark, a complete generation took:
 | [DMAD](docs/dmad.md) | 4 | 14 s | 80 s |
 | [TaoMate-H3](docs/taomate.md) | 3 | 14 s | 66 s |
 | [PDMD](docs/pdmd.md) | 2 | 14 s | 52 s |
+| [pi-H3 with video VAE](docs/pih3.md) | 2 | 14 s | 51 s |
+| [pi-H3 DWD](docs/pih3.md#dwd-on-cuda) | 2 | 13–14 s | 38 s |
+| [pi-H3 DWD](docs/pih3.md#dwd-on-cuda) | 4 | 13–14 s | 65 s |
 
 Each generated a 1344×768, 124-frame video, 5.2 seconds at 24 fps.
+The 2-step DWD variant took 34.28–34.49 s with [NVFP4 linear layers](docs/nvfp4.md).
 
 With [draft steps](docs/draft-steps.md), the first steps run on a canvas of half the width and
 height, which settles the layout and the motion in a quarter of the tokens. With the first two of

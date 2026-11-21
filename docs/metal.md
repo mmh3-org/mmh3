@@ -3,6 +3,7 @@
 The `metal` backend runs video generation on Apple silicon, and image generation with
 [MiniMax H3 Image](image.md), using the same model checkpoints as the CUDA backend. MP4 output uses
 VideoToolbox for H.264 video and AAC audio. External encoding through ffmpeg is optional.
+Video output on Metal uses the video VAE. The pi-H3 DWD pixel refiner runs on a local CUDA device.
 
 ## Requirements
 
