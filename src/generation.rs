@@ -417,8 +417,15 @@ impl Settings {
                 }
                 Schedule::taomate(shift_video, shift_audio)
             }
+            "pih3" => {
+                let steps = option_number(options, "steps", 2)?;
+                Schedule::pi_h3(steps, shift_video, shift_audio)
+                    .ok_or("--schedule pih3 needs --steps 2 or 4")?
+            }
             other => {
-                return Err(format!("--schedule must be uniform or taomate, not {other}").into());
+                return Err(
+                    format!("--schedule must be uniform, taomate or pih3, not {other}").into(),
+                );
             }
         };
         let sampler = match options.get("sampler").copied().unwrap_or("euler") {
