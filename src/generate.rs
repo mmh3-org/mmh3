@@ -27,14 +27,15 @@ pub fn run(arguments: &[String], usage: &'static str) -> Result<(), Box<dyn Erro
     #[cfg(feature = "cuda")]
     use mmh3_cuda::audio_vae::{CudaAudioDecoder as AudioDecoder, SAMPLE_RATE};
     #[cfg(feature = "cuda")]
-    use mmh3_cuda::vae::dwd::CudaDwdDecoder;
+    use mmh3_cuda::vae::dwd::CudaDwdDecoder as DwdDecoder;
     #[cfg(feature = "metal")]
     use mmh3_metal::audio_vae::{MetalAudioDecoder as AudioDecoder, SAMPLE_RATE};
+    #[cfg(feature = "metal")]
+    use mmh3_metal::vae::dwd::MetalDwdDecoder as DwdDecoder;
     use mmh3_output::MediaSpec;
     use std::time::Instant;
 
     let (arguments, ffmpeg_arguments) = split_ffmpeg_arguments(arguments);
-    #[allow(unused_mut)]
     let mut options = parse_options(
         arguments,
         &[OPTIONS, &["out", "audio-vae"]].concat(),
@@ -50,9 +51,7 @@ pub fn run(arguments: &[String], usage: &'static str) -> Result<(), Box<dyn Erro
         }
         crate::models::load_algorithm_cache();
     }
-    #[cfg(feature = "cuda")]
     let dwd_path = crate::models::model_file(&options, "dwd", &["patches", "loras"])?;
-    #[cfg(feature = "cuda")]
     let dwd_file = if let Some(path) = dwd_path.as_deref() {
         if options.contains_key("patch") {
             return Err("--dwd already applies the adapter as a patch".into());
@@ -64,7 +63,7 @@ pub fn run(arguments: &[String], usage: &'static str) -> Result<(), Box<dyn Erro
         {
             return Err("--dwd needs an adapter converted with tools/models/pih3_patch.py".into());
         }
-        CudaDwdDecoder::validate(&file)?;
+        DwdDecoder::validate(&file)?;
         options.insert("patch", path);
         Some(file)
     } else {
@@ -98,17 +97,29 @@ pub fn run(arguments: &[String], usage: &'static str) -> Result<(), Box<dyn Erro
 
     match video {
         SampledVideo::Latent(video) => decode_video(&options, &settings, &video, &mut output)?,
-        #[cfg(feature = "cuda")]
         SampledVideo::Dwd(features) => {
             let started = Instant::now();
             let file = dwd_file.as_ref().expect("DWD output uses a DWD adapter");
-            let frames =
-                crate::resident::with_room(|| Ok(CudaDwdDecoder::load(file)?.decode(&features)?))?;
-            output.write_cuda_video(&frames)?;
+            #[cfg(feature = "cuda")]
+            {
+                let frames =
+                    crate::resident::with_room(|| Ok(DwdDecoder::load(file)?.decode(&features)?))?;
+                output.write_cuda_video(&frames)?;
+            }
+            #[cfg(feature = "metal")]
+            {
+                let linear = crate::metal::linear_precision(&options)?;
+                let attention = crate::metal::attention_precision(&options)?;
+                let frames = crate::resident::with_room(|| {
+                    Ok(DwdDecoder::load(file, linear, attention)?.decode(&features)?)
+                })?;
+                output.write_metal_video(&frames)?;
+            }
             println!(
                 "refined and submitted the video with DWD in {:.1} s",
                 started.elapsed().as_secs_f64()
             );
+            #[cfg(feature = "cuda")]
             crate::models::save_algorithm_cache();
         }
     }

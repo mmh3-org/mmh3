@@ -30,9 +30,9 @@ make generate
 `make download-models` downloads the models into `models`, and `make generate` writes a video with
 audio from a sample prompt to `out.mp4`. See [Usage](docs/usage.md) for the other settings.
 
-### pi-H3 video on CUDA
+### pi-H3 video
 
-On a single CUDA GPU, the pi-H3 DWD adapter produces RGB from the final DiT features. These
+On a single CUDA or Metal GPU, the pi-H3 DWD adapter produces RGB from the final DiT features. These
 commands download the converted 2-step patch and run it.
 
 ```sh
@@ -91,8 +91,8 @@ On a DGX Spark, a complete generation took:
 | [TaoMate-H3](docs/taomate.md) | 3 | 14 s | 66 s |
 | [PDMD](docs/pdmd.md) | 2 | 14 s | 52 s |
 | [pi-H3 with video VAE](docs/pih3.md) | 2 | 14 s | 51 s |
-| [pi-H3 DWD](docs/pih3.md#dwd-on-cuda) | 2 | 13–14 s | 38 s |
-| [pi-H3 DWD](docs/pih3.md#dwd-on-cuda) | 4 | 13–14 s | 65 s |
+| [pi-H3 DWD](docs/pih3.md#dwd-benchmark) | 2 | 13–14 s | 38 s |
+| [pi-H3 DWD](docs/pih3.md#dwd-benchmark) | 4 | 13–14 s | 65 s |
 
 Each generated a 1344×768, 124-frame video, 5.2 seconds at 24 fps.
 The 2-step DWD variant took 34.28–34.49 s with [NVFP4 linear layers](docs/nvfp4.md).

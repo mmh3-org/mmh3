@@ -352,6 +352,8 @@ fn adapter_lora_matches_a_cpu_weight_update() {
                 &[],
                 &[alpha],
             ),
+            // A converted DWD patch also carries tensors for the pixel refiner.
+            ("dwd_pixel_refiner.register_tokens", &[1], &[0.0]),
         ],
         &[],
     )

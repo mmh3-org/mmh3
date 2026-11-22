@@ -7,6 +7,7 @@ use crate::{
     shard::ShardContext,
     sparse::SparsePass,
     streaming::{Pass, Stream, fits},
+    vae::dwd::DwdFeatures,
     veda::{VedaPass, VedaWeights},
 };
 use mmh3_core::{
@@ -73,14 +74,33 @@ impl PreparedText<'_> {
         capture: &[usize],
         sparse: Option<&mmh3_core::dit::sparse::SparseAttention>,
     ) -> Result<DitOutput> {
+        self.check_context(inputs)?;
+        let (output, _) = self
+            .model
+            .forward_inner(inputs, capture, sparse, &self.text, None, false)?;
+        Ok(output)
+    }
+
+    /// The final pi-H3 step returns the audio velocity and the refiner's video features.
+    pub fn forward_dwd(
+        &self,
+        inputs: &DitInputs,
+        sparse: Option<&mmh3_core::dit::sparse::SparseAttention>,
+    ) -> Result<(DitOutput, DwdFeatures)> {
+        self.check_context(inputs)?;
+        let (output, features) =
+            self.model
+                .forward_inner(inputs, &[], sparse, &self.text, None, true)?;
+        Ok((output, features.expect("a DWD step returns video features")))
+    }
+
+    fn check_context(&self, inputs: &DitInputs) -> Result<()> {
         if inputs.context != *self.source {
             return Err(Error::new(
                 "prepared text does not match the context".into(),
             ));
         }
-
-        self.model
-            .forward_inner(inputs, capture, sparse, &self.text, false, None)
+        Ok(())
     }
 }
 
@@ -348,8 +368,12 @@ impl MetalDit {
         const PREFIX: &str = "diffusion_model.";
         let mut replaced = 0;
         for info in file.tensors() {
-            let Some(name) = info.name.strip_prefix(PREFIX) else {
+            // A DWD adapter shares a checkpoint with its pixel refiner, loaded after sampling.
+            if info.name.starts_with(mmh3_core::dwd::PREFIX) {
                 continue;
+            }
+            let Some(name) = info.name.strip_prefix(PREFIX) else {
+                return Err(Error::new(format!("unsupported LoRA tensor {}", info.name)));
             };
             if [".lora_A.weight", ".lora_B.weight", ".alpha"]
                 .iter()
@@ -771,7 +795,10 @@ impl MetalDit {
         sparse: Option<&mmh3_core::dit::sparse::SparseAttention>,
     ) -> Result<DitOutput> {
         let prepared = self.prepare_text(&inputs.context)?;
-        self.forward_inner(inputs, capture, sparse, &prepared.text, true, None)
+        let (mut output, _) =
+            self.forward_inner(inputs, capture, sparse, &prepared.text, None, false)?;
+        output.text_states = prepared.text.to_f32()?;
+        Ok(output)
     }
 
     /// One rank's share of a step. It carries the rows the shard gives it through every block and
@@ -786,7 +813,8 @@ impl MetalDit {
     ) -> Result<VelocityRows> {
         let prepared = self.prepare_text(&inputs.context)?;
         let rows = context.shard.own_tokens();
-        let out = self.forward_inner(inputs, &[], sparse, &prepared.text, false, Some(context))?;
+        let (out, _) =
+            self.forward_inner(inputs, &[], sparse, &prepared.text, Some(context), false)?;
         Ok(VelocityRows {
             rows,
             video: out.video,
@@ -820,9 +848,9 @@ impl MetalDit {
         capture: &[usize],
         sparse: Option<&mmh3_core::dit::sparse::SparseAttention>,
         text: &Array,
-        capture_text: bool,
         mut shard: Option<&mut ShardContext>,
-    ) -> Result<DitOutput> {
+        dwd: bool,
+    ) -> Result<(DitOutput, Option<DwdFeatures>)> {
         let c = &self.config;
         if inputs.context.shape.len() != 2
             || inputs.context.shape[1] != c.text_dim
@@ -845,14 +873,15 @@ impl MetalDit {
 
         let w = &self.weights;
         let width = c.hidden;
+        if dwd
+            && (width != mmh3_core::dwd::INPUT
+                || w.shape("dwd_norm_out.linear.weight")? != [2 * width, c.adaln_rank]
+                || w.shape("dwd_norm_out.linear.bias")? != [2 * width])
+        {
+            return Err(Error::new("DWD AdaLN does not match the DiT".into()));
+        }
         let d = &w.device;
         let upload = |values: &[f32], cols| Array::from_f32(d, values.len() / cols, cols, values);
-        let text_states = if capture_text {
-            text.to_f32()?
-        } else {
-            Vec::new()
-        };
-
         let layout = PackedLayout::for_inputs(inputs);
         let method = sparse
             .filter(|settings| layout.len() >= settings.min_tokens)
@@ -865,6 +894,11 @@ impl MetalDit {
         // VSA runs the blocks on the sequence with the video in cube order.
         let plan =
             matches!(method, Some(SparseMethod::Vsa { .. })).then(|| VsaPlan::for_layout(&layout));
+        if dwd && (plan.is_some() || shard.is_some()) {
+            return Err(Error::new(
+                "DWD requires local video rows in canvas order".into(),
+            ));
+        }
         let sparse = match (method, &plan) {
             (Some(SparseMethod::Sol { tau }), _) => Some(SparsePass::sol(
                 d,
@@ -1136,6 +1170,26 @@ impl MetalDit {
             hidden = hidden.add_gated(&delta, &gates, &rows, 5)?;
         }
 
+        let features = if dwd {
+            let time = time
+                .slice(timesteps.video, 1, 0, c.adaln_rank)?
+                .unary(1, 1.0)?;
+            let table = w.linear(&time, "dwd_norm_out.linear")?;
+            let target = hidden.slice(video_rows.start, video_rows.len(), 0, width)?;
+            let scale = Array::from_f32(d, 1, width, &vec![1.0; width])?;
+            let rows = RowMap::new(d, &vec![0; video_rows.len()])?;
+            let values = target
+                .norm(&scale, 1e-5, true)?
+                .modulate(&table, &rows, 1, 0)?;
+            let shape = &inputs.video.shape;
+            Some(DwdFeatures {
+                values,
+                grid: [shape[1], shape[2] / 2, shape[3] / 2],
+            })
+        } else {
+            None
+        };
+
         let m = modulation("final_layer.adaln_proj.linear", 2)?;
         let project = |kind, name: &str| -> Result<Vec<f32>> {
             let s = layout.segment(kind);
@@ -1155,20 +1209,28 @@ impl MetalDit {
         };
 
         let mut video = Vec::new();
-        for (layer, weight) in self.video_outputs(inputs.sigma) {
-            let projected = project(SegmentKind::Video, &layer)?;
-            match video.is_empty() {
-                true if weight == 1.0 => video = projected,
-                true => video = projected.iter().map(|value| weight * value).collect(),
-                false => {
-                    for (sum, value) in video.iter_mut().zip(projected) {
-                        *sum += weight * value;
+        if features.is_none() {
+            for (layer, weight) in self.video_outputs(inputs.sigma) {
+                let projected = project(SegmentKind::Video, &layer)?;
+                match video.is_empty() {
+                    true if weight == 1.0 => video = projected,
+                    true => video = projected.iter().map(|value| weight * value).collect(),
+                    false => {
+                        for (sum, value) in video.iter_mut().zip(projected) {
+                            *sum += weight * value;
+                        }
                     }
                 }
             }
-        }
-        if let Some(plan) = &plan {
-            video = plan.restore_video(&video, c.video_patch_features());
+            if let Some(plan) = &plan {
+                video = plan.restore_video(&video, c.video_patch_features());
+            }
+            if shard.is_none() {
+                video = unpatchify_video(&video, &inputs.video.shape)
+                    .into_iter()
+                    .map(|v| -v)
+                    .collect();
+            }
         }
         let audio = project(SegmentKind::Audio, "final_layer.audio_out")?;
         // The rows of one rank cannot be unpatchified on their own, so a share answers with the
@@ -1178,34 +1240,31 @@ impl MetalDit {
         // negated projection, but `assemble_velocity` negates what the parts carry once it has
         // gathered them. Negating here as well would send this rank's rows the wrong way, and a
         // rank driven away from the data looks like a rank that never moved.
-        let (video, audio) = if shard.is_some() {
-            (video, audio)
+        let audio = if shard.is_some() {
+            audio
         } else {
-            (
-                unpatchify_video(&video, &inputs.video.shape)
-                    .into_iter()
-                    .map(|v| -v)
-                    .collect(),
-                unpack_audio(&audio, &inputs.audio.shape)
-                    .into_iter()
-                    .map(|v| -v)
-                    .collect(),
-            )
+            unpack_audio(&audio, &inputs.audio.shape)
+                .into_iter()
+                .map(|v| -v)
+                .collect()
         };
-        Ok(DitOutput {
-            text_states,
-            blocks,
-            video,
-            audio,
-            routed_fraction: match &veda {
-                Some(veda) => veda.kept_fraction()?,
-                None => sparse
-                    .as_ref()
-                    .map(SparsePass::routed_fraction)
-                    .transpose()?
-                    .flatten(),
+        Ok((
+            DitOutput {
+                text_states: Vec::new(),
+                blocks,
+                video,
+                audio,
+                routed_fraction: match &veda {
+                    Some(veda) => veda.kept_fraction()?,
+                    None => sparse
+                        .as_ref()
+                        .map(SparsePass::routed_fraction)
+                        .transpose()?
+                        .flatten(),
+                },
             },
-        })
+            features,
+        ))
     }
 }
 

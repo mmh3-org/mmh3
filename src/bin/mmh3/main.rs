@@ -36,7 +36,7 @@ of the options, and switches the default DiT to diffusion_models/minimax_h3_ref2
 FLAC, MP3, AAC, ALAC, Ogg Vorbis, MP4 or Matroska file, resampled to the audio VAE's 32 kHz.
 --reference-video takes an H.264 MP4 the prompt refers to as <Video 1>, <Video 2> and so on. Its frames are decoded
 with NVDEC, and its soundtrack becomes the <Audio j> that precedes it.
---dwd applies a converted pi-H3 adapter and runs its pixel refiner on one local CUDA device.
+--dwd applies a converted pi-H3 adapter and runs its pixel refiner on one local CUDA or Metal device.
 Use --schedule pih3 and the step count of the adapter.
 MP4 uses NVENC on CUDA or VideoToolbox on Metal for H.264 video, with built-in AAC audio.
 WebM uses built-in VP9 + Opus.

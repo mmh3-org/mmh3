@@ -7,7 +7,6 @@ use crate::gemm::{
 };
 use crate::loader::{LoadError, Uploader};
 use crate::{CudaError, DeviceBuffer, check};
-use mmh3_core::json;
 use mmh3_core::safetensors::{DType, SafeTensors, TensorInfo};
 use mmh3_core::tensor::Tensor;
 use std::collections::HashMap;
@@ -517,21 +516,7 @@ pub(crate) fn i32_buffer(values: &[usize]) -> Result<DeviceBuffer, CudaError> {
 }
 
 pub(crate) fn check_quantization(name: &str, bytes: &[u8]) -> Result<(), Error> {
-    let text =
-        std::str::from_utf8(bytes).map_err(|_| Error::Model(format!("{name} is not UTF-8")))?;
-    let value = json::parse(text).map_err(|error| Error::Model(format!("{name}: {error}")))?;
-    let format = value.get("format").and_then(json::Value::as_str);
-    let convrot = value.get("convrot").and_then(json::Value::as_bool);
-    let group = value.get("convrot_groupsize").and_then(json::Value::as_u64);
-    if format != Some("int8_tensorwise")
-        || convrot != Some(true)
-        || group != Some(CONVROT_GROUP as u64)
-    {
-        return Err(Error::Model(format!(
-            "{name}: unsupported quantization {text}"
-        )));
-    }
-    Ok(())
+    mmh3_core::safetensors::check_int8_convrot(name, bytes).map_err(Error::Model)
 }
 
 /// Element type of a cuBLASLt linear layer's input, weight, bias and output.

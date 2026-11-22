@@ -36,7 +36,7 @@ make generate LORA=pdmd
 ```
 
 For [pi-H3](pih3.md), use `LORA=pih3` for video VAE output or `LORA=pih3-dwd` for DWD on one
-local CUDA device. Set `PIH3_STEPS=4` on both commands to use the 4-step adapter.
+local CUDA or Metal device. Set `PIH3_STEPS=4` on both commands to use the 4-step adapter.
 
 `OUTPUT_OPTIONS` goes last on the line, so `make generate OUTPUT_OPTIONS=--ffmpeg` writes the MP4
 through ffmpeg on a GPU or in a container without NVENC.
@@ -100,8 +100,8 @@ through ffmpeg on a GPU or in a container without NVENC.
   `--veda-reference-sparsity 0` attends to every keyframe and reference token.
 - `--patch FILE` (default none): A patch for the DiT, such as the FastH3 patch, applied before a
   LoRA.
-- `--dwd FILE` applies the converted [pi-H3 DWD](pih3.md#dwd-on-cuda) patch and uses its pixel
-  refiner for video output. It runs on one local CUDA device with `--schedule pih3` and the step
+- `--dwd FILE` applies the converted [pi-H3 DWD](pih3.md#dwd) patch and uses its pixel refiner
+  for video output. It runs on one local CUDA or Metal device with `--schedule pih3` and the step
   count of the adapter. It takes the place of `--patch`.
 - `--lora FILE`, `--lora-strength X` (default none, 1.0): A ComfyUI LoRA for the DiT.
 - `--lora-mode adapter|merge` (default `adapter`): `adapter` runs the LoRA next to the INT8 weights,

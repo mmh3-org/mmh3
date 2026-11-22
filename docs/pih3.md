@@ -7,7 +7,7 @@ DiT features.
 
 ## Download and generate
 
-Use `LORA=pih3` for the video VAE or `LORA=pih3-dwd` for DWD on one local CUDA device. Both
+Use `LORA=pih3` for the video VAE or `LORA=pih3-dwd` for DWD on one local CUDA or Metal device. Both
 default to two steps. Set `PIH3_STEPS=4` on both commands to select the matching 4-step adapter.
 
 ```sh
@@ -19,6 +19,9 @@ The download fetches the converted patch directly into `models/patches`.
 [Distributed patches](https://huggingface.co/yniw/MiniMax-H3-mmh3) · [Conversion instructions](../tools/models/README.md#pih3_patchpy)
 
 ## Video VAE output
+
+The Make presets select the backend and its attention precision. For a direct CLI invocation on
+Metal, omit `--attention-precision int8-fp8` in the examples below to use the Mac's default.
 
 ```sh
 tools/download-models.sh --no-fasth3 --pih3 2
@@ -55,7 +58,7 @@ For the distributed run, put the patch in both machines' models directories and 
 `--local-worker --worker HOST:PORT` to the generation command. Both Sparks share each DiT step
 and the video decode. See [Distributed generation](distributed.md) for worker setup.
 
-## DWD on CUDA
+## DWD
 
 Use `--video-vae none` for text-to-video with audio. To use `--first-frame` or `--last-frame`,
 pass `--video-vae int8` to download the video VAE. Both paths use the audio VAE decoder.
@@ -74,16 +77,16 @@ target video rows through its own LayerNorm and time modulation, expands them to
 block contributes 17 frames, and a two-latent tail contributes five. First- and last-frame
 conditioning still uses the video VAE encoder. The audio path keeps the audio VAE decoder.
 
-DWD runs on one local CUDA device and accepts the pi-H3 Euler schedule with FL2VA inputs.
-Use `--devices` to pick a single card on a multi-GPU host. DWD can use dense or Sol attention in
-the DiT. For four steps, use `--pih3-dwd 4`, `--steps 4` and
+DWD runs on one local CUDA or Metal device and accepts the pi-H3 Euler schedule with FL2VA
+inputs. Use `--devices` to pick a single card on a multi-GPU host. DWD can use dense or Sol
+attention in the DiT. For four steps, use `--pih3-dwd 4`, `--steps 4` and
 `--dwd minimax_h3_pih3_4step_dwd.safetensors`.
 
 ### DWD benchmark
 
 These runs used the Tokyo rain prompt and seed 1 at 1344×768 and 124 frames. They used Sol-Attn at
-tau 1.3 and INT8/FP8 DiT attention. The video output stage includes decoder loading and
-submission to NVENC.
+tau 1.3 and INT8/FP8 DiT attention on one DGX Spark. The video output stage includes decoder
+loading and submission to NVENC.
 
 | Variant | Steps | DiT linear precision | Video output stage | Total |
 | --- | ---: | --- | ---: | ---: |
@@ -114,3 +117,6 @@ MMH3_DWD_REFERENCE=/path/to/dwd_reference.safetensors \
   MMH3_DWD_WEIGHTS=/path/to/pi_h3_2step_dwd_adapter_int8_convrot.safetensors \
   cargo test -p mmh3-cuda --lib vae::dwd::tests::matches_reference_pixels -- --ignored --nocapture
 ```
+
+On macOS, run the same test with `-p mmh3-metal` to compare the Metal refiner against the same
+reference.

@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod direct_file;
 pub mod dit;
+pub mod dwd;
 pub mod generation;
 pub mod json;
 pub mod latent_upscaler;

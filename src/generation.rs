@@ -282,8 +282,10 @@ impl Settings {
         }
         let cards = Self::cards(options)?;
         if options.contains_key("dwd") {
-            if !cfg!(feature = "cuda") || cards.len() != 1 || !borrowed.is_empty() {
-                return Err("--dwd requires one local CUDA device and no worker options".into());
+            if cards.len() != 1 || !borrowed.is_empty() {
+                return Err(
+                    "--dwd requires one local CUDA or Metal device and no worker options".into(),
+                );
             }
             return Ok((Vec::new(), cards));
         }
@@ -585,10 +587,15 @@ impl Settings {
     }
 }
 
+#[cfg(feature = "cuda")]
+use mmh3_cuda::vae::dwd::DwdFeatures;
+#[cfg(feature = "metal")]
+use mmh3_metal::vae::dwd::DwdFeatures;
+
 pub(crate) enum SampledVideo {
     Latent(Tensor),
-    #[cfg(feature = "cuda")]
-    Dwd(mmh3_cuda::vae::dwd::DwdFeatures),
+    #[cfg(any(feature = "cuda", feature = "metal"))]
+    Dwd(DwdFeatures),
 }
 
 /// Samples the final video and audio latents for the latent tool and the CPU leader.
@@ -601,7 +608,7 @@ pub fn sample(
     }
     match sample_video(options, settings)? {
         (SampledVideo::Latent(video), audio) => Ok((video, audio)),
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "metal"))]
         (SampledVideo::Dwd(_), _) => unreachable!("a latent run cannot request DWD"),
     }
 }
@@ -680,7 +687,7 @@ pub(crate) fn sample_video(
             "--dwd needs the pi-H3 Euler schedule and FL2VA, with no draft steps or VSA".into(),
         );
     }
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "metal"))]
     let mut video_features = None;
     let dit_file = if has_references {
         REFERENCE_DIT_FILE
@@ -1043,7 +1050,14 @@ pub(crate) fn sample_video(
                             let prepared = prepared
                                 .as_ref()
                                 .ok_or("a step to take here and no DiT to take it")?;
-                            prepared.forward(&inputs, &[], step_sparse.as_ref())?
+                            if dwd && step + 1 == steps {
+                                let (outputs, features) =
+                                    prepared.forward_dwd(&inputs, step_sparse.as_ref())?;
+                                video_features = Some(features);
+                                outputs
+                            } else {
+                                prepared.forward(&inputs, &[], step_sparse.as_ref())?
+                            }
                         };
                         (whole_velocity(&outputs), outputs.routed_fraction)
                     }
@@ -1142,7 +1156,7 @@ pub(crate) fn sample_video(
     }
     #[cfg(feature = "cuda")]
     save_algorithm_cache();
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "metal"))]
     if let Some(features) = video_features {
         return Ok((SampledVideo::Dwd(features), audio));
     }
