@@ -71,8 +71,9 @@ target/release/mmh3 image --models models --out out.png --width 4096 --height 40
 
 ## Performance
 
-These are the times of a complete generation, including model loading and encoding, with warm
-model files. [Performance and accuracy](docs/performance.md) has the times of each stage.
+These are the times of a complete generation, including model loading and encoding. The earlier
+benchmarks used warm model files. [Performance and accuracy](docs/performance.md) has the times
+of each stage.
 
 ### Videos on CUDA on Linux and Windows (WSL)
 
@@ -118,7 +119,8 @@ A complete generation took:
 
 Each generated a 672×384, 73-frame video, 3.0 seconds at 24 fps. On the M6, the 2-step
 [PDMD](docs/pdmd.md) LoRA generated a video of the same size in 45 s, and the 4-step
-[DMAD](docs/dmad.md) LoRA in 76 s.
+[DMAD](docs/dmad.md) LoRA in 76 s. In a later comparison on the M6, the second runs took 55 s with
+[2-step pi-H3 DWD](docs/pih3.md#speed-on-metal) and 66 s with PDMD.
 
 ### Images on CUDA
 

@@ -100,6 +100,24 @@ The 2-step INT8 VAE and DWD runs were interleaved on one DGX Spark. The first DW
 runs used `--linear-precision nvfp4` on the other Spark, where the first invocation took 37.72 s.
 The 4-step result is one run.
 
+### Speed on Metal
+
+An M6 with 24 GB generated 672×384, 73-frame clips from the Makefile's Tokyo rain prompt and seed
+1. Both presets ran in two steps with INT8 DiT products, FP16 attention and native MP4 output with
+audio. The total is the CLI wall time, including model loading and encoding. The video output
+stage includes loading the video VAE or DWD refiner, running it and submitting frames to
+VideoToolbox.
+
+| Run | Model | Two DiT steps | Video output stage | Total |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | PDMD | 82.1 s | 11.1 s | 107.3 s |
+| 2 | pi-H3 DWD | 49.4 s | 2.1 s | 61.8 s |
+| 3 | pi-H3 DWD | 42.1 s | 2.1 s | 54.5 s |
+| 4 | PDMD | 41.8 s | 11.6 s | 65.9 s |
+
+Most of the 11.4 s saved on the second DWD run relative to the second PDMD run came from video
+output. System-wide swap use rose by about 7.5 GiB during the first PDMD run.
+
 ### Reference check
 
 The CUDA refiner was compared with [LakonLab's FP32 refiner](https://github.com/Lakonik/LakonLab/blob/2ee2b334374ec91b7cee371a85a524bf4ba644d3/lakonlab/models/architectures/sol_h3/sol_h3.py)
