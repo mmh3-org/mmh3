@@ -1,192 +1,100 @@
 # mmh3
 
-mmh3 is an inference engine dedicated to the MiniMax H3 family, written in Rust with CUDA and Metal
-kernels and running without PyTorch or ComfyUI. It generates videos with audio with
-[MiniMax H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) and images with
-[MiniMax H3 Image](https://huggingface.co/MiniMaxAI/MiniMax-H3-Image). The tokenizer, the Qwen3-VL
-text encoder, the diffusion transformer, the samplers and the VAEs are written in this repository
-and tuned for the shapes of these models.
+mmh3 is a standalone Rust inference engine for generating video with audio and generating or
+editing images. It includes the tokenizer, Qwen3-VL text encoder, diffusion transformer, samplers
+and VAEs. [MiniMax H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) ·
+[MiniMax H3 Image](https://huggingface.co/MiniMaxAI/MiniMax-H3-Image)
 
-Videos run on one machine or [distributed across several](docs/distributed.md) running
-`mmh3 worker`, splitting every diffusion step between them over RDMA where there is a path for it
-and ordinary sockets where there is not. The machine that hands the work out runs none of it, so it
-needs no GPU of its own.
+Install the prerequisites for your backend, then run the examples from the repository root.
+[CUDA on Linux and Windows (WSL)](docs/cuda.md) · [Metal on macOS](docs/metal.md)
 
-The backends are [CUDA](docs/cuda.md) on Linux and Windows (WSL) and [Metal](docs/metal.md) on
-macOS, each with its own kernels. Each page says what that backend needs.
+The benchmarks below use one device and include model loading and file output.
 
-## Getting started
-
-With what your backend needs installed, [CUDA](docs/cuda.md) or [Metal](docs/metal.md), run these
-commands from the repository directory:
+## Generate video
 
 ```sh
-make
 make download-models
 make generate
 ```
 
-`make` builds mmh3 with Metal on macOS and CUDA on Linux and Windows (WSL).
-`make download-models` downloads the models into `models`, and `make generate` writes a video with
-audio from a sample prompt to `out.mp4`. See [Usage](docs/usage.md) for the other settings.
+This downloads the models into `models`, builds for your backend and writes `out.mp4` with audio
+from the sample prompt. The default Make preset uses four FastH3 steps. Set `PROMPT`, `SEED` and
+`OUT` to change the prompt, seed and output path. [Video usage](docs/usage.md) ·
+[FastH3](docs/fasth3.md)
 
-### pi-H3 video
+| Backend | Device | Default clip | Total |
+| --- | --- | --- | ---: |
+| CUDA | DGX Spark | 1344×768, 124 frames | 80 s |
+| Metal | M4 Max | 672×384, 73 frames | 153 s |
+| Metal | M6 | 672×384, 73 frames | 67 s |
 
-On a single CUDA or Metal GPU, the pi-H3 DWD adapter produces RGB from the final DiT features. These
-commands download the converted 2-step patch and run it.
+### Faster video
+
+Use the two-step pi-H3 DWD preset. Its pixel refiner produces video frames directly from the
+final DiT features. On CUDA with NVFP4 support, add
+`OUTPUT_OPTIONS="--linear-precision nvfp4"` to the generation command for the fastest CUDA result.
+For the two-step PDMD preset, use `LORA=pdmd` on both commands. [pi-H3](docs/pih3.md) ·
+[PDMD](docs/pdmd.md)
 
 ```sh
 make download-models LORA=pih3-dwd
 make generate LORA=pih3-dwd
 ```
 
-Set `PIH3_STEPS=4` on both commands for the 4-step adapter. Use `LORA=pih3` for video VAE output.
-The DWD download includes the models for text-to-video with audio. First- and last-frame
-conditioning also uses the video VAE encoder. See [pi-H3](docs/pih3.md) for model files and commands.
+The faster presets use the same clip sizes as the default runs.
 
-### Images
+| Backend | Device | Preset | Total |
+| --- | --- | --- | ---: |
+| CUDA | DGX Spark | 2-step pi-H3 DWD with NVFP4 | 34.3–34.5 s |
+| Metal | M6 | 2-step pi-H3 DWD | 54.5–61.8 s |
+| Metal | M6 | 2-step PDMD, earlier benchmark | 45 s |
 
-These commands download MiniMax H3 Image and write an image to `out.png`. See
-[Image](docs/image.md) for its settings and for editing images.
+In the later Metal comparison, PDMD took 65.9 s on its second run and DWD took 54.5 s.
+[CUDA benchmark](docs/pih3.md#dwd-benchmark) · [Metal comparison](docs/pih3.md#speed-on-metal)
+
+## Generate images
 
 ```sh
+make
 tools/download-models.sh --image
-target/release/mmh3 image --models models --out out.png \
-  --prompt "A red panda in a knitted scarf sits on a mossy log in a misty pine forest at dawn."
-```
-
-These settings generate a 4096×4096 image in about 24 s on a DGX Spark, in three steps of the
-[PDMD](docs/pdmd.md) LoRA on a half-size canvas and one at full size, which can change the details
-and the composition. See [Image](docs/image.md#faster) for what they change.
-
-```sh
-tools/download-models.sh --image --pdmd --latent-upscaler
 target/release/mmh3 image --models models --out out.png --width 4096 --height 4096 \
-  --steps 3 --lora minimax_h3_pdmd_2step_lora_rank128_bf16.safetensors \
-  --draft-steps 3 --renoise-sigma 0.5 \
-  --latent-upscaler minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors \
-  --attention-precision int8-fp8 \
   --prompt "A red panda in a knitted scarf sits on a mossy log in a misty pine forest at dawn."
 ```
 
-## Performance
+This writes a 4096×4096 PNG with the model's default six steps. [Image generation and editing](docs/image.md)
 
-These are the times of a complete generation, including model loading and encoding. The earlier
-benchmarks used warm model files. [Performance and accuracy](docs/performance.md) has the times
-of each stage.
+| Backend | Device | Total at 4096×4096 |
+| --- | --- | ---: |
+| CUDA | DGX Spark | 63 s |
+| Metal | M5 Max | 165 s |
+| Metal | M6 | 337 s |
 
-### Videos on CUDA on Linux and Windows (WSL)
+### Faster images
 
-`make generate` uses FastVideo's 4-step [FastH3](docs/fasth3.md) as a patch on the base DiT, with
-its video sparse attention, INT8/FP8 attention and the INT8 video VAE, and writes MP4 with NVENC
-H.264 and AAC. Compared with mmh3's defaults, these can change image details and the composition.
-The other few-step presets and their settings are linked in the table.
+On CUDA and the M6, use PDMD with three steps at half resolution, the latent upscaler and one
+step at full resolution. Set `--attention-precision int8-fp8` on CUDA or `int8-fp16` on Metal.
+On CUDA, add `--linear-precision nvfp4`. On the M5 Max, `--draft-steps 2 --attention sol`
+with FP16 attention and bilinear enlargement gave its fastest recorded time.
+[Faster image commands](docs/image.md#faster) ·
+[Image benchmarks](docs/image.md#speed)
 
-On a DGX Spark, a complete generation took:
-
-| Model | Steps | Time per step | Time |
-| --- | ---: | ---: | ---: |
-| [FastH3](docs/fasth3.md) | 4 | 14 s | 80 s |
-| [lightx2v Turbo LoRA](docs/lightx2v-turbo.md) | 4 | 14 s | 81 s |
-| [DMAD](docs/dmad.md) | 4 | 14 s | 80 s |
-| [TaoMate-H3](docs/taomate.md) | 3 | 14 s | 66 s |
-| [PDMD](docs/pdmd.md) | 2 | 14 s | 52 s |
-| [pi-H3 with video VAE](docs/pih3.md) | 2 | 14 s | 51 s |
-| [pi-H3 DWD](docs/pih3.md#dwd-benchmark) | 2 | 13–14 s | 38 s |
-| [pi-H3 DWD](docs/pih3.md#dwd-benchmark) | 4 | 13–14 s | 65 s |
-
-Each generated a 1344×768, 124-frame video, 5.2 seconds at 24 fps.
-The 2-step DWD variant took 34.28–34.49 s with [NVFP4 linear layers](docs/nvfp4.md).
-
-With [draft steps](docs/draft-steps.md), the first steps run on a canvas of half the width and
-height, which settles the layout and the motion in a quarter of the tokens. With the first two of
-the Turbo LoRA's four steps as draft steps, a generation took 61.5 s rather than 83.2 s.
-
-### Videos on Metal on macOS
-
-`make generate` uses the same 4-step [FastH3](docs/fasth3.md) patch with its video sparse
-attention, in a smaller and shorter clip, and writes MP4 with VideoToolbox H.264 and AAC. The DiT,
-the text encoder and the video VAE's transformer run on the GPU's matrix units with INT8 products
-and FP16 attention, on the Neural Accelerators of an M5 or later. A Mac whose GPU cannot hold a
-whole model keeps as many layers as fit and reads the others from the disk as they run.
-
-A complete generation took:
-
-| Mac | Memory | Time per step | Time |
-| --- | ---: | ---: | ---: |
-| M4 Max | 128 GB | 27 s | 153 s |
-| M6 | 24 GB | 12 s | 67 s |
-
-Each generated a 672×384, 73-frame video, 3.0 seconds at 24 fps. On the M6, the 2-step
-[PDMD](docs/pdmd.md) LoRA generated a video of the same size in 45 s, and the 4-step
-[DMAD](docs/dmad.md) LoRA in 76 s. In a later comparison on the M6, the second runs took 55 s with
-[2-step pi-H3 DWD](docs/pih3.md#speed-on-metal) and 66 s with PDMD.
-
-### Images on CUDA
-
-On a DGX Spark, a 4096×4096 image took:
-
-| Settings | Time per step | Time |
-| --- | ---: | ---: |
-| [Faster settings](docs/image.md#faster): 3 PDMD steps as draft steps, INT8/FP8 attention | 7.4 s | 24 s |
-| The same with [NVFP4 linear layers](docs/nvfp4.md) | 6.1 s | 23 s |
-| Defaults, six steps, BF16 attention | 8.8 s | 63 s |
-
-The times per step are those of a step at full size, of which the faster settings run one.
-A [server](docs/server.md) that keeps the models loaded takes 15 s with the faster settings.
-[Image](docs/image.md) has the times of other settings.
-
-### Images on Metal
-
-A 4096×4096 image took:
-
-| Mac | Settings | Time per step | Time |
-| --- | --- | ---: | ---: |
-| M6, 24 GB | [Faster settings](docs/image.md#faster): 3 PDMD steps as draft steps, INT8/FP16 attention | 59 s | 140 s |
-| M6, 24 GB | Defaults, FP16 attention | 49 s | 337 s |
-| M5 Max, 128 GB | 2 [draft steps](docs/draft-steps.md) enlarged bilinearly, Sol-Attn and FP16 attention | 14 s | 89 s |
-| M5 Max, 128 GB | Defaults, FP16 attention | 24 s | 165 s |
-
-On the M6, the DiT's blocks that do not fit are read from the disk as they run. The M5 Max is a
-14-inch MacBook Pro in High Power Mode on AC power, whose GPU clock moved its times by two thirds to
-one and a half times. [Image](docs/image.md#speed) has the times of other settings.
-
-## Status
-
-### Videos
-
-- Text to video with audio (T2VA) works end to end, one video at a time. Native MP4 and WebM
-  generation and complete video/audio decoding have been verified on GB10.
-- Videos from a first frame, a last frame or both ([FL2VA](docs/fl2va.md)) work too.
-- Videos from reference images, sounds and clips ([Ref2VA](docs/ref2va.md)) work with the ref2va
-  DiT, reading reference clips from MP4 files.
-
-### Images
-
-- Images of about 16 megapixels from text, and edits of up to 16 reference images
-  ([Image](docs/image.md)), work with `mmh3 image` on CUDA and have been checked against diffusers'
-  pipeline. They work on Metal too, where editing needs macOS 26.
-
-### Machines
-
-- NVIDIA GPUs with CUDA. It is developed on a DGX Spark (GB10, `sm_121`) and builds for `sm_120f`,
-  so it should also run on RTX PRO 6000 and RTX 50 series GPUs, which have not been tested yet. The
-  build also targets Ada (`sm_89`), which runs on an RTX 4090.
-- Apple silicon with Metal on macOS 15 or later, tested on an M4 Max and an M6. Text to video with
-  audio works with LoRAs, patches such as FastH3's, and Sol-Attn and VSA sparse attention, and a
-  Mac with 24 GB runs it by reading the layers that do not fit from the disk. Videos from frames and
-  references work on macOS 26. See [Metal](docs/metal.md) for its current limits.
-- [Distributed generation](docs/distributed.md) of videos works on both backends and between them,
-  and from a machine with neither. Shares follow what each machine measures itself to do. Between
-  two DGX Sparks a 768p run takes about a quarter less, and a Mac that hands every step to a Spark
-  rather than taking one itself generates about twenty-five times faster than it does alone.
-- An [HTTP server](docs/server.md) takes a video or an image as a form and keeps its models
-  loaded between the generations it runs, so the second one against a warm server starts at its
-  first step. It has no authentication of its own and waits on loopback.
+| Backend | Device | Settings | Total at 4096×4096 |
+| --- | --- | --- | ---: |
+| CUDA | DGX Spark | PDMD, 3 draft steps, NVFP4 | 23 s |
+| Metal | M5 Max | 2 draft steps, Sol-Attn, FP16 attention | 89 s |
+| Metal | M6 | PDMD, 3 draft steps, INT8/FP16 attention | 140 s |
 
 ## Documentation
 
-[docs/README.md](docs/README.md) lists the documentation pages.
+- Set up model files, build the engine and choose an output format. [Models](docs/models.md) ·
+  [Build](docs/build.md) · [Output](docs/output.md)
+- Generate video from keyframes or from reference images, sounds and clips.
+  [First and last frames](docs/fl2va.md) · [Reference media](docs/ref2va.md)
+- Split video generation across CUDA and Metal workers over RDMA or sockets, or serve video and
+  image requests over HTTP with models kept in memory. [Distributed generation](docs/distributed.md) ·
+  [Server](docs/server.md)
+- Find the other presets, per-stage timings and accuracy checks. [Documentation index](docs/README.md) ·
+  [Performance and accuracy](docs/performance.md)
 
 ## License
 
