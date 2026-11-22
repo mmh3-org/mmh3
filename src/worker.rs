@@ -4073,8 +4073,8 @@ impl<'a> Coordinator<'a> {
     fn relay_regions(&mut self) -> Result<(), Box<dyn Error>> {
         let mut here = Vec::with_capacity(self.ranks());
         let mut ports = vec![0u32; self.ranks()];
-        for rank in 0..self.ranks() {
-            let socket = self.peers[rank].reader.get_ref();
+        for peer in &self.peers {
+            let socket = peer.reader.get_ref();
             here.push(
                 socket
                     .peer_addr()
