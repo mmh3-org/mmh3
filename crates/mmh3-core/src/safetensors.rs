@@ -104,6 +104,19 @@ impl TensorInfo {
     }
 }
 
+/// Validates ComfyUI's INT8 ConvRot metadata before the weights are read.
+pub fn check_int8_convrot(name: &str, bytes: &[u8]) -> Result<(), String> {
+    let text = std::str::from_utf8(bytes).map_err(|_| format!("{name} is not UTF-8"))?;
+    let value = json::parse(text).map_err(|error| format!("{name}: {error}"))?;
+    if value.get("format").and_then(Value::as_str) != Some("int8_tensorwise")
+        || value.get("convrot").and_then(Value::as_bool) != Some(true)
+        || value.get("convrot_groupsize").and_then(Value::as_u64) != Some(256)
+    {
+        return Err(format!("{name}: unsupported quantization {text}"));
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),

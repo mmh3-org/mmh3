@@ -105,6 +105,66 @@ kernel void copy_rows(device const float *x [[buffer(0)]], device float *y [[buf
         y[(i / p[1] + p[3]) * p[2] + i % p[1] + p[4]] = x[i];
 }
 
+// Packed words work for the FP16 and FP32 rows read by attention.
+kernel void gather_indexed_rows(device const uint4 *x [[buffer(0)]],
+                                device const uint *indices [[buffer(1)]],
+                                device uint4 *y [[buffer(2)]], constant uint *p [[buffer(3)]],
+                                uint i [[thread_position_in_grid]]) {
+    if (i < p[0] * p[1])
+        y[i] = x[indices[i / p[1]] * p[1] + i % p[1]];
+}
+
+kernel void scatter_indexed_rows(device const uint4 *x [[buffer(0)]],
+                                 device const uint *indices [[buffer(1)]],
+                                 device uint4 *y [[buffer(2)]], constant uint *p [[buffer(3)]],
+                                 uint i [[thread_position_in_grid]]) {
+    if (i < p[0] * p[1])
+        y[indices[i / p[1]] * p[1] + i % p[1]] = x[i];
+}
+
+// Feature expansion gives each DiT row a 2 × 2 patch of the finer grid. The global
+// rows follow the pixel rows, with a zero class token after each block's registers.
+kernel void dwd_expand_rows(device const float *expanded [[buffer(0)]],
+                            device const float *registers [[buffer(1)]],
+                            device float *hidden [[buffer(2)]], constant uint *p [[buffer(3)]],
+                            uint i [[thread_position_in_grid]]) {
+    const uint height = p[0], width = p[1], video_rows = p[2], dim = p[4];
+    const uint row = i / dim, col = i % dim;
+    if (row >= p[3])
+        return;
+    if (row < video_rows) {
+        const uint t = row / (height * width), y = row / width % height, x = row % width;
+        const uint coarse = (t * (height / 2) + y / 2) * (width / 2) + x / 2;
+        const uint fine = (y % 2) * 2 + x % 2;
+        hidden[i] = expanded[(coarse * 4 + fine) * dim + col];
+    } else {
+        const uint reg = (row - video_rows) % p[5];
+        hidden[i] = reg < p[6] ? registers[reg * dim + col] : 0.0f;
+    }
+}
+
+// Unpatchify projected [token, channel, time, y, x] rows into planar RGB and undo normalization.
+kernel void dwd_pixels(device const float *projected [[buffer(0)]], device float *rgb [[buffer(1)]],
+                       constant uint *p [[buffer(2)]], uint i [[thread_position_in_grid]]) {
+    if (i >= p[0])
+        return;
+    constexpr float mean[] = {-0.03f, -0.088f, -0.188f};
+    constexpr float deviation[] = {0.458f, 0.448f, 0.45f};
+    const uint patch_frames = p[3], height = p[4], width = p[5], patch = p[6];
+    const uint plane = height * width;
+    const uint x = i % width, y = i / width % height, channel = i / plane % 3;
+    const uint frame = i / (3 * plane);
+    const uint token =
+        (frame / patch_frames * (height / patch) + y / patch) * (width / patch) + x / patch;
+    const uint source =
+        (((token * 3 + channel) * patch_frames + frame % patch_frames) * patch + y % patch) *
+            patch +
+        x % patch;
+    const uint destination = (channel * p[1] + p[2] + frame) * plane + i % plane;
+    rgb[destination] =
+        clamp((projected[source] * deviation[channel] + mean[channel] + 1.0f) * 0.5f, 0.0f, 1.0f);
+}
+
 kernel void embedding(device const uchar *x [[buffer(0)]], device const uint *indices [[buffer(1)]],
                       device float *y [[buffer(2)]], constant uint *p [[buffer(3)]],
                       uint i [[thread_position_in_grid]]) {
@@ -292,7 +352,15 @@ void tiled_attention(device const float *q, device const float *k, device const 
                      device float *o, constant uint *p, uint group, uint tid, uint lane, uint simd,
                      threadgroup float *keys, threadgroup float *values) {
     constexpr uint TILE = 16, QUERIES = 8, LANES = 32;
-    uint heads = p[1], kv_heads = p[2], dim = p[3], head = group % heads;
+    uint heads = p[1], kv_heads = p[2], dim = p[3];
+    const uint groups_per_window = ((p[5] + QUERIES - 1) / QUERIES) * heads;
+    const uint window = group / groups_per_window;
+    q += size_t(window) * p[5] * heads * dim;
+    o += size_t(window) * p[5] * heads * dim;
+    k += size_t(window) * p[0] * kv_heads * dim;
+    v += size_t(window) * p[0] * kv_heads * dim;
+    group %= groups_per_window;
+    const uint head = group % heads;
     uint first = (group / heads) * QUERIES, row = first + simd;
     uint kh = head / (heads / kv_heads);
     uint count = p[4] ? min(p[0], first + QUERIES) : p[0];

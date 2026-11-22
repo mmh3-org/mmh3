@@ -871,25 +871,15 @@ impl Array {
             return Err(Error::new("unsupported attention layout".into()));
         }
 
-        let out = Self::empty(self.device(), self.rows, self.cols)?;
-        self.device().run(
-            &format!(
-                "attention_{}",
-                (self.cols / heads).next_power_of_two().max(32)
-            ),
-            &[&self.buffer, &key.buffer, &value.buffer, &out.buffer],
-            &[
-                key.rows as u32,
-                heads as u32,
-                kv_heads as u32,
-                (self.cols / heads) as u32,
-                causal as u32,
-                self.rows as u32,
-            ],
-            self.rows.div_ceil(8) * heads,
-            true,
-        )?;
-        Ok(out)
+        float_attention(
+            self.device(),
+            [&self.buffer, &key.buffer, &value.buffer],
+            [self.rows, key.rows, 1],
+            heads,
+            kv_heads,
+            self.cols / heads,
+            causal,
+        )
     }
 
     /// `attention` at `precision`. FP16 takes the matrix units for heads of up to 128 where the
@@ -942,7 +932,7 @@ impl Array {
             return half_attention(
                 self.device(),
                 [&q, &k, &v],
-                [self.rows, key.rows],
+                [self.rows, key.rows, 1],
                 heads,
                 kv_heads,
                 dim,
@@ -958,7 +948,7 @@ impl Array {
         let out = half_attention(
             self.device(),
             [&q, &k, &v],
-            [self.rows, key.rows],
+            [self.rows, key.rows, 1],
             heads,
             kv_heads,
             padded,
@@ -1536,17 +1526,45 @@ pub(crate) fn attends_in_half(device: &Device, precision: AttentionPrecision, di
     precision.on_matrix_units() && [64, 128].contains(&dim) && device.supports_tensor_ops()
 }
 
-/// `flash_attention` over FP16 query, key and value rows of `rows` = [queries, keys].
-fn half_attention(
+/// FP32 attention over independent windows in packed query, key and value buffers.
+fn float_attention(
     device: &Device,
     [q, k, v]: [&Buffer; 3],
-    [queries, keys]: [usize; 2],
+    [queries, keys, windows]: [usize; 3],
     heads: usize,
     kv_heads: usize,
     dim: usize,
     causal: bool,
 ) -> Result<Array> {
-    let out = Array::empty(device, queries, heads * dim)?;
+    let out = Array::empty(device, queries * windows, heads * dim)?;
+    device.run(
+        &format!("attention_{}", dim.next_power_of_two().max(32)),
+        &[q, k, v, &out.buffer],
+        &[
+            keys as u32,
+            heads as u32,
+            kv_heads as u32,
+            dim as u32,
+            causal as u32,
+            queries as u32,
+        ],
+        queries.div_ceil(8) * heads * windows,
+        true,
+    )?;
+    Ok(out)
+}
+
+/// `flash_attention` over independent windows in packed FP16 query, key and value buffers.
+fn half_attention(
+    device: &Device,
+    [q, k, v]: [&Buffer; 3],
+    [queries, keys, windows]: [usize; 3],
+    heads: usize,
+    kv_heads: usize,
+    dim: usize,
+    causal: bool,
+) -> Result<Array> {
+    let out = Array::empty(device, queries * windows, heads * dim)?;
     device.run(
         &format!("mpp_attention_{dim}"),
         &[q, k, v, &out.buffer],
@@ -1558,7 +1576,7 @@ fn half_attention(
             causal as u32,
             queries as u32,
         ],
-        queries.div_ceil(TENSOR_ATTENTION_QUERIES) * heads,
+        queries.div_ceil(TENSOR_ATTENTION_QUERIES) * heads * windows,
         true,
     )?;
     Ok(out)
@@ -1661,7 +1679,7 @@ impl AttentionInputs {
             return half_attention(
                 device,
                 [&self.query, &self.key, &self.value],
-                [self.rows, self.rows],
+                [self.rows, self.rows, 1],
                 self.heads,
                 self.heads,
                 self.dim,
@@ -1678,6 +1696,69 @@ impl AttentionInputs {
             &array(&self.value),
             self.heads,
             self.heads,
+            false,
+        )
+    }
+
+    /// Packs equal-sized rectangular windows and scatters their results back to the query rows.
+    pub(crate) fn attend_windows(
+        &self,
+        (queries, query): (usize, &RowMap),
+        (keys, key): (usize, &RowMap),
+        output: &Array,
+    ) -> Result<()> {
+        let width = self.width();
+        let stride = width * if self.half { 2 } else { 4 };
+        if queries == 0
+            || keys == 0
+            || !query.len.is_multiple_of(queries)
+            || !key.len.is_multiple_of(keys)
+            || query.len / queries != key.len / keys
+            || query.maximum >= self.rows
+            || key.maximum >= self.rows
+            || !stride.is_multiple_of(16)
+            || output.shape() != [self.rows, width]
+            || self.quantized.is_some()
+        {
+            return Err(Error::new("invalid attention windows".into()));
+        }
+        let device = output.device();
+        let gather = |input, indices: &RowMap| -> Result<Buffer> {
+            size(indices.len, width)?;
+            let packed = device.alloc(indices.len * stride, None)?;
+            let vectors = stride / 16;
+            device.run(
+                "gather_indexed_rows",
+                &[input, &indices.buffer, &packed],
+                &[indices.len as u32, vectors as u32],
+                indices.len * vectors,
+                false,
+            )?;
+            Ok(packed)
+        };
+        let q = gather(&self.query, query)?;
+        let k = gather(&self.key, key)?;
+        let v = gather(&self.value, key)?;
+        let attend = if self.half {
+            half_attention
+        } else {
+            float_attention
+        };
+        let attended = attend(
+            device,
+            [&q, &k, &v],
+            [queries, keys, query.len / queries],
+            self.heads,
+            self.heads,
+            self.dim,
+            false,
+        )?;
+        let vectors = width / 4;
+        device.run(
+            "scatter_indexed_rows",
+            &[&attended.buffer, &query.buffer, &output.buffer],
+            &[query.len as u32, vectors as u32],
+            query.len * vectors,
             false,
         )
     }
@@ -1840,6 +1921,36 @@ mod tests {
                         .fold(0.0, f32::max);
                     assert!(worst < 2e-2, "INT8, angles {}: {worst}", angles.is_some());
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn rectangular_attention_windows_stay_independent() {
+        let device = Device::shared().unwrap();
+        let (rows, heads, dim) = (130, 2, 64);
+        let width = heads * dim;
+        let zeros = Array::zeros(&device, rows, width).unwrap();
+        let values: Vec<_> = (0..rows)
+            .flat_map(|row| std::iter::repeat_n(row as f32, width))
+            .collect();
+        let value = Array::from_f32(&device, rows, width, &values).unwrap();
+        let query_order: Vec<_> = (0..rows).rev().collect();
+        let key_order: Vec<_> = (0..67).chain(63..130).collect();
+        let queries = RowMap::new(&device, &query_order).unwrap();
+        let keys = RowMap::new(&device, &key_order).unwrap();
+        for half in [false, true] {
+            if half && !device.supports_tensor_ops() {
+                continue;
+            }
+            let inputs = AttentionInputs::from_arrays(&zeros, &zeros, &value, heads, half).unwrap();
+            let output = Array::empty(&device, rows, width).unwrap();
+            inputs
+                .attend_windows((65, &queries), (67, &keys), &output)
+                .unwrap();
+            for (index, row) in output.to_f32().unwrap().chunks_exact(width).enumerate() {
+                let mean = if index < 65 { 96.0 } else { 33.0 };
+                assert!(row.iter().all(|x| (x - mean).abs() < 1e-4));
             }
         }
     }

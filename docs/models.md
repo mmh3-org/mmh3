@@ -42,7 +42,7 @@ downloads into another directory.
 
 ### pi-H3
 
-`--pih3 2|4` and `--pih3-dwd 2|4` select the video VAE and CUDA DWD variants. The downloader
+`--pih3 2|4` and `--pih3-dwd 2|4` select the video VAE and DWD variants. The downloader
 places the converted patch in `patches`. [yniw/MiniMax-H3-mmh3](https://huggingface.co/yniw/MiniMax-H3-mmh3)
 
 | Variant | Patch |

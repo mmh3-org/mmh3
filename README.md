@@ -30,9 +30,9 @@ make generate
 `make download-models` downloads the models into `models`, and `make generate` writes a video with
 audio from a sample prompt to `out.mp4`. See [Usage](docs/usage.md) for the other settings.
 
-### pi-H3 video on CUDA
+### pi-H3 video
 
-On a single CUDA GPU, the pi-H3 DWD adapter produces RGB from the final DiT features. These
+On a single CUDA or Metal GPU, the pi-H3 DWD adapter produces RGB from the final DiT features. These
 commands download the converted 2-step patch and run it.
 
 ```sh
@@ -71,8 +71,9 @@ target/release/mmh3 image --models models --out out.png --width 4096 --height 40
 
 ## Performance
 
-These are the times of a complete generation, including model loading and encoding, with warm
-model files. [Performance and accuracy](docs/performance.md) has the times of each stage.
+These are the times of a complete generation, including model loading and encoding. The earlier
+benchmarks used warm model files. [Performance and accuracy](docs/performance.md) has the times
+of each stage.
 
 ### Videos on CUDA on Linux and Windows (WSL)
 
@@ -91,8 +92,8 @@ On a DGX Spark, a complete generation took:
 | [TaoMate-H3](docs/taomate.md) | 3 | 14 s | 66 s |
 | [PDMD](docs/pdmd.md) | 2 | 14 s | 52 s |
 | [pi-H3 with video VAE](docs/pih3.md) | 2 | 14 s | 51 s |
-| [pi-H3 DWD](docs/pih3.md#dwd-on-cuda) | 2 | 13–14 s | 38 s |
-| [pi-H3 DWD](docs/pih3.md#dwd-on-cuda) | 4 | 13–14 s | 65 s |
+| [pi-H3 DWD](docs/pih3.md#dwd-benchmark) | 2 | 13–14 s | 38 s |
+| [pi-H3 DWD](docs/pih3.md#dwd-benchmark) | 4 | 13–14 s | 65 s |
 
 Each generated a 1344×768, 124-frame video, 5.2 seconds at 24 fps.
 The 2-step DWD variant took 34.28–34.49 s with [NVFP4 linear layers](docs/nvfp4.md).
@@ -118,7 +119,8 @@ A complete generation took:
 
 Each generated a 672×384, 73-frame video, 3.0 seconds at 24 fps. On the M6, the 2-step
 [PDMD](docs/pdmd.md) LoRA generated a video of the same size in 45 s, and the 4-step
-[DMAD](docs/dmad.md) LoRA in 76 s.
+[DMAD](docs/dmad.md) LoRA in 76 s. In a later comparison on the M6, the second runs took 55 s with
+[2-step pi-H3 DWD](docs/pih3.md#speed-on-metal) and 66 s with PDMD.
 
 ### Images on CUDA
 

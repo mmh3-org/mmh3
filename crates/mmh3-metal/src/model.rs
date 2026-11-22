@@ -3,9 +3,8 @@ use crate::{
     ops::{Array, Finish, Lora, PackedRows, Packing, convert, dtype_code},
 };
 use mmh3_core::{
-    json,
     numeric::f32_to_f16,
-    safetensors::{DType, SafeTensors, TensorInfo},
+    safetensors::{DType, SafeTensors, TensorInfo, check_int8_convrot},
     streaming::{Arrangement, Files, UnitReader},
     tensor::Tensor,
 };
@@ -248,18 +247,7 @@ impl Weights {
             }
 
             if name.ends_with(".comfy_quant") {
-                let text =
-                    std::str::from_utf8(file.data(info)).map_err(|e| Error::new(e.to_string()))?;
-                let value = json::parse(text).map_err(|e| Error::new(e.to_string()))?;
-                if value.get("format").and_then(json::Value::as_str) != Some("int8_tensorwise")
-                    || value.get("convrot").and_then(json::Value::as_bool) != Some(true)
-                    || value.get("convrot_groupsize").and_then(json::Value::as_u64) != Some(256)
-                {
-                    return Err(Error::new(format!(
-                        "{name}: unsupported quantization {text}"
-                    )));
-                }
-
+                check_int8_convrot(name, file.data(info)).map_err(Error::new)?;
                 continue;
             }
 
@@ -1048,8 +1036,6 @@ impl Weights {
         Ok(())
     }
 
-    /// Adds the LoRA layers of `file` as adapters and returns how many there are. The file's other
-    /// tensors are the model's business, which a patch replaces.
     /// `norm` followed by `modulate`, in one pass for an RMS norm.
     pub(crate) fn norm_modulate(
         &self,
@@ -1073,6 +1059,7 @@ impl Weights {
         )
     }
 
+    /// Adds the LoRA layers of `file` as adapters and returns how many there are.
     pub fn add_lora(&mut self, file: &SafeTensors, strength: f32) -> Result<usize> {
         if !strength.is_finite() {
             return Err(Error::new("LoRA strength must be finite".into()));
@@ -1081,11 +1068,11 @@ impl Weights {
         let mut adapters = Vec::new();
         const PREFIX: &str = "diffusion_model.";
         for info in file.tensors() {
-            let Some(name) = info.name.strip_prefix(PREFIX) else {
-                return Err(Error::new(format!("unsupported LoRA tensor {}", info.name)));
-            };
-
-            let Some(layer) = name.strip_suffix(".lora_A.weight") else {
+            let Some(layer) = info
+                .name
+                .strip_prefix(PREFIX)
+                .and_then(|name| name.strip_suffix(".lora_A.weight"))
+            else {
                 continue;
             };
 

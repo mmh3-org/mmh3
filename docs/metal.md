@@ -3,7 +3,8 @@
 The `metal` backend runs video generation on Apple silicon, and image generation with
 [MiniMax H3 Image](image.md), using the same model checkpoints as the CUDA backend. MP4 output uses
 VideoToolbox for H.264 video and AAC audio. External encoding through ffmpeg is optional.
-Video output on Metal uses the video VAE. The pi-H3 DWD pixel refiner runs on a local CUDA device.
+For [pi-H3](pih3.md) video on Metal, use `LORA=pih3` for video VAE output or `LORA=pih3-dwd` for
+the local DWD pixel refiner.
 
 ## Requirements
 
@@ -126,8 +127,8 @@ so a small difference in the scores keeps a different tenth.
 
 ## Approximate speed
 
-A 672×384, 73-frame clip, with warm model files and including loading, generation and MP4 output,
-takes about:
+These times for a 672×384, 73-frame clip include loading, generation and MP4 output. The FastH3,
+PDMD and DMAD runs used warm model files.
 
 | Mac | Model | Each step | Whole generation |
 | --- | --- | ---: | ---: |
@@ -135,6 +136,10 @@ takes about:
 | M6 | [FastH3](fasth3.md), `make generate` | 12 s | 67 s |
 | M6 | [PDMD](pdmd.md), 2 steps | | 45 s |
 | M6 | [DMAD](dmad.md), 4 steps | | 76 s |
+| M6 | [pi-H3 DWD](pih3.md#speed-on-metal), 2 steps | | 54.5–61.8 s |
+
+The DWD range comes from two runs in a later comparison with PDMD. The second PDMD run in that
+comparison took 65.9 s.
 
 Loading uncached models takes longer, and larger clips require more time and memory.
 These figures are a starting point for this configuration, not a comparison across GPUs.

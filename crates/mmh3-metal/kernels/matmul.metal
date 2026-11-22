@@ -375,6 +375,15 @@ void flash_attention(device half *q, device half *k, device half *v, device floa
     // read the same keys and values, which then stay in the cache. Taking the heads of one block
     // together instead is far slower.
     const int blocks = (rows + ATTENTION_QUERIES - 1) / ATTENTION_QUERIES;
+    if constexpr (!INT8) {
+        const uint groups_per_window = blocks * heads;
+        const uint window = g / groups_per_window;
+        q += size_t(window) * rows * heads * D;
+        o += size_t(window) * rows * heads * D;
+        k += size_t(window) * count * kv_heads * D;
+        v += size_t(window) * count * kv_heads * D;
+        g %= groups_per_window;
+    }
     const int head = g / blocks, kv_head = head / (heads / kv_heads), block = g % blocks;
     const int first = block * ATTENTION_QUERIES + simd * FRAGMENT;
     // A group past the last query still takes every block, since the four take them together.

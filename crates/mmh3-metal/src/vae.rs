@@ -16,6 +16,8 @@ use mmh3_core::{
 };
 use std::cell::OnceCell;
 
+pub mod dwd;
+
 pub use mmh3_core::vae::{DEFAULT_TILE_OVERLAP_MIN, DEFAULT_TILE_SIZE};
 
 /// Tokens of a picture's tiles that decode together: about sixty tiles of 256 pixels, well past the
