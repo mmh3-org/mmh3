@@ -14,7 +14,7 @@ const USAGE: &str = "usage:
                 [--reference-audio FILE]... [--reference-video FILE]...
                 [--schedule uniform|taomate|pih3] [--steps N] [--sampler euler|renoise] [--draft-steps N] [--seed N] [--shift-video X] [--shift-audio X]
                 [--dit FILE] [--video-vae FILE] [--audio-vae FILE] [--text-encoder FILE] [--latent-upscaler FILE]
-                [--patch FILE] [--lora FILE] [--lora-strength X] [--lora-mode adapter|merge] [--attention dense|sol|vsa] [--attention-precision bf16|int8-fp8] [--linear-precision int8|nvfp4] [--sparse-tau X] [--sparse-start X] [--vsa-sparsity X]
+                [--patch FILE | --dwd FILE] [--lora FILE] [--lora-strength X] [--lora-mode adapter|merge] [--attention dense|sol|vsa] [--attention-precision bf16|int8-fp8] [--linear-precision int8|nvfp4] [--sparse-tau X] [--sparse-start X] [--vsa-sparsity X]
                 [--devices CARD,CARD...] [--worker HOST[:PORT] [--worker-units UNITS]]...
                 [--local-worker [--worker-units UNITS]] [--token FILE] [--consistent] [--vram-budget GB]
                 [--ffmpeg [FFMPEG_ARGUMENTS...]]

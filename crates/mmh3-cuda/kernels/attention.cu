@@ -122,8 +122,8 @@ struct AttentionMaps {
 template <typename Element, int HEAD_DIM, bool TMA, bool ROPE>
 __global__ void __launch_bounds__(THREADS, HEAD_DIM == 64 ? 2 : 1)
     attention_kernel(const Element *__restrict__ query, const Element *__restrict__ key,
-                     const Element *__restrict__ value, Element *__restrict__ output, int tokens,
-                     Mmh3AttentionLayout layout, float scale_log2,
+                     const Element *__restrict__ value, Element *__restrict__ output,
+                     int query_tokens, int key_tokens, Mmh3AttentionLayout layout, float scale_log2,
                      const __grid_constant__ AttentionMaps maps, AttentionRope rope) {
     __shared__ float rope_scratch[ROPE ? WARPS * HEAD_DIM : 1];
     using T = Tiles<HEAD_DIM>;
@@ -167,14 +167,14 @@ __global__ void __launch_bounds__(THREADS, HEAD_DIM == 64 ? 2 : 1)
             }
         } else {
             load_rows<HEAD_DIM, THREADS>(stage_address(stage), key_head, layout.token_stride[KEY],
-                                         block * BLOCK_N, BLOCK_N, tokens);
+                                         block * BLOCK_N, BLOCK_N, key_tokens);
             load_rows<HEAD_DIM, THREADS>(stage_address(stage) + T::tile_bytes, value_head,
                                          layout.token_stride[VALUE], block * BLOCK_N, BLOCK_N,
-                                         tokens);
+                                         key_tokens);
         }
     };
 
-    int blocks = (tokens + BLOCK_N - 1) / BLOCK_N;
+    int blocks = (key_tokens + BLOCK_N - 1) / BLOCK_N;
     if (layout.causal) {
         blocks = min(blocks, (first_query + BLOCK_M + BLOCK_N - 1) / BLOCK_N);
     }
@@ -198,7 +198,7 @@ __global__ void __launch_bounds__(THREADS, HEAD_DIM == 64 ? 2 : 1)
         barrier_wait(barriers + 16, 0);
     } else {
         load_rows<HEAD_DIM, THREADS>(stage_address(1), query_head, layout.token_stride[QUERY],
-                                     first_query, BLOCK_M, tokens);
+                                     first_query, BLOCK_M, query_tokens);
         copy_async_commit();
         load_key_value_block(0, 0);
         copy_async_commit();
@@ -208,7 +208,7 @@ __global__ void __launch_bounds__(THREADS, HEAD_DIM == 64 ? 2 : 1)
 
     if constexpr (ROPE) {
         normalize_rotate<Element, HEAD_DIM, BLOCK_M, TMA, WARPS>(
-            stage_address(1), first_query, BLOCK_M, tokens, rope, rope_scratch);
+            stage_address(1), first_query, BLOCK_M, query_tokens, rope, rope_scratch);
         __syncthreads();
     }
 
@@ -263,7 +263,7 @@ __global__ void __launch_bounds__(THREADS, HEAD_DIM == 64 ? 2 : 1)
 
         // NOTE: every query row sees key 0 in the first block, so a causal row never starts from an
         // all-masked block.
-        const bool masked_block = (block + 1) * BLOCK_N > tokens ||
+        const bool masked_block = (block + 1) * BLOCK_N > key_tokens ||
                                   (layout.causal && (block + 1) * BLOCK_N - 1 > first_query);
         #pragma unroll
         for (int key_tile_index = 0; key_tile_index < BLOCK_N / 8; key_tile_index++) {
@@ -282,7 +282,7 @@ __global__ void __launch_bounds__(THREADS, HEAD_DIM == 64 ? 2 : 1)
                     const int key_index =
                         block * BLOCK_N + key_tile_index * 8 + (lane % 4) * 2 + (element % 2);
                     const int query_index = first_query + warp * 16 + (element / 2) * 8 + lane / 4;
-                    if (key_index >= tokens || (layout.causal && key_index > query_index)) {
+                    if (key_index >= key_tokens || (layout.causal && key_index > query_index)) {
                         scores[key_tile_index][element] = -FLT_MAX;
                     }
                 }
@@ -364,7 +364,7 @@ __global__ void __launch_bounds__(THREADS, HEAD_DIM == 64 ? 2 : 1)
     #pragma unroll
     for (int half = 0; half < 2; half++) {
         const int token = first_query + warp * 16 + half * 8 + group_id;
-        if (token >= tokens) {
+        if (token >= query_tokens) {
             continue;
         }
         const float inverse_sum = 1.0f / row_sum[half];
@@ -425,9 +425,9 @@ template <> CUtensorMapDataType map_type<__half>() { return CU_TENSOR_MAP_DATA_T
 
 template <typename Element, int HEAD_DIM, bool TMA, bool ROPE>
 int launch_kernel(const Element *query, const Element *key, const Element *value, Element *output,
-                  int tokens, int heads, int batch, const Mmh3AttentionLayout &layout,
-                  const AttentionMaps &maps, const AttentionRope &rope, float scale_log2,
-                  cudaStream_t stream) {
+                  int query_tokens, int key_tokens, int heads, int batch,
+                  const Mmh3AttentionLayout &layout, const AttentionMaps &maps,
+                  const AttentionRope &rope, float scale_log2, cudaStream_t stream) {
     auto kernel = attention_kernel<Element, HEAD_DIM, TMA, ROPE>;
     // The TMA path adds its barriers and the alignment its boxes need.
     constexpr int shared_bytes = Tiles<HEAD_DIM>::shared_bytes + (TMA ? 256 : 0);
@@ -437,30 +437,31 @@ int launch_kernel(const Element *query, const Element *key, const Element *value
     if (configured != cudaSuccess) {
         return static_cast<int>(configured);
     }
-    dim3 grid((tokens + BLOCK_M - 1) / BLOCK_M, heads, batch);
-    kernel<<<grid, THREADS, shared_bytes, stream>>>(query, key, value, output, tokens, layout,
-                                                    scale_log2, maps, rope);
+    dim3 grid((query_tokens + BLOCK_M - 1) / BLOCK_M, heads, batch);
+    kernel<<<grid, THREADS, shared_bytes, stream>>>(query, key, value, output, query_tokens,
+                                                    key_tokens, layout, scale_log2, maps, rope);
     return static_cast<int>(cudaGetLastError());
 }
 
 template <typename Element, int HEAD_DIM, bool TMA>
 int launch_roped(const Element *query, const Element *key, const Element *value, Element *output,
-                 int tokens, int heads, int batch, const Mmh3AttentionLayout &layout,
-                 const AttentionMaps &maps, const AttentionRope &rope, float scale_log2,
-                 cudaStream_t stream) {
+                 int query_tokens, int key_tokens, int heads, int batch,
+                 const Mmh3AttentionLayout &layout, const AttentionMaps &maps,
+                 const AttentionRope &rope, float scale_log2, cudaStream_t stream) {
     if (rope.angles != nullptr) {
-        return launch_kernel<Element, HEAD_DIM, TMA, true>(query, key, value, output, tokens, heads,
-                                                           batch, layout, maps, rope, scale_log2,
-                                                           stream);
+        return launch_kernel<Element, HEAD_DIM, TMA, true>(query, key, value, output, query_tokens,
+                                                           key_tokens, heads, batch, layout, maps,
+                                                           rope, scale_log2, stream);
     }
-    return launch_kernel<Element, HEAD_DIM, TMA, false>(
-        query, key, value, output, tokens, heads, batch, layout, maps, rope, scale_log2, stream);
+    return launch_kernel<Element, HEAD_DIM, TMA, false>(query, key, value, output, query_tokens,
+                                                        key_tokens, heads, batch, layout, maps,
+                                                        rope, scale_log2, stream);
 }
 
 template <typename Element, int HEAD_DIM>
-int launch(const void *query, const void *key, const void *value, void *output, int tokens,
-           int heads, int batch, const Mmh3AttentionLayout &layout, const AttentionRope &rope,
-           float scale, cudaStream_t stream) {
+int launch(const void *query, const void *key, const void *value, void *output, int query_tokens,
+           int key_tokens, int heads, int batch, const Mmh3AttentionLayout &layout,
+           const AttentionRope &rope, float scale, cudaStream_t stream) {
     Mmh3AttentionLayout normalized = layout;
     normalized.heads_per_key_value =
         layout.heads_per_key_value > 0 ? layout.heads_per_key_value : 1;
@@ -475,23 +476,23 @@ int launch(const void *query, const void *key, const void *value, void *output, 
     const CUtensorMapDataType type = map_type<Element>();
     const bool mapped =
         mmh3_tma_available() &&
-        encode_attention_map(&maps.query, query_base, type, sizeof(Element), HEAD_DIM, tokens,
+        encode_attention_map(&maps.query, query_base, type, sizeof(Element), HEAD_DIM, query_tokens,
                              heads, batch, BLOCK_M, normalized.token_stride[QUERY],
                              normalized.head_stride[QUERY], normalized.batch_stride[QUERY]) &&
-        encode_attention_map(&maps.key, key_base, type, sizeof(Element), HEAD_DIM, tokens,
+        encode_attention_map(&maps.key, key_base, type, sizeof(Element), HEAD_DIM, key_tokens,
                              key_value_heads, batch, BLOCK_N, normalized.token_stride[KEY],
                              normalized.head_stride[KEY], normalized.batch_stride[KEY]) &&
-        encode_attention_map(&maps.value, value_base, type, sizeof(Element), HEAD_DIM, tokens,
+        encode_attention_map(&maps.value, value_base, type, sizeof(Element), HEAD_DIM, key_tokens,
                              key_value_heads, batch, BLOCK_N, normalized.token_stride[VALUE],
                              normalized.head_stride[VALUE], normalized.batch_stride[VALUE]);
     if (mapped) {
         return launch_roped<Element, HEAD_DIM, true>(query_base, key_base, value_base, output_base,
-                                                     tokens, heads, batch, normalized, maps, rope,
-                                                     scale_log2, stream);
+                                                     query_tokens, key_tokens, heads, batch,
+                                                     normalized, maps, rope, scale_log2, stream);
     }
     return launch_roped<Element, HEAD_DIM, false>(query_base, key_base, value_base, output_base,
-                                                  tokens, heads, batch, normalized, maps, rope,
-                                                  scale_log2, stream);
+                                                  query_tokens, key_tokens, heads, batch,
+                                                  normalized, maps, rope, scale_log2, stream);
 }
 
 } // namespace
@@ -510,20 +511,20 @@ extern "C" int mmh3_attention_roped(int element_type, int head_dim, const void *
     }
     const AttentionRope rope = {angles, pairs, epsilon};
     if (element_type == 0 && head_dim == 128) {
-        return launch<__nv_bfloat16, 128>(query, key, value, output, tokens, heads, batch, *layout,
-                                          rope, scale, stream);
+        return launch<__nv_bfloat16, 128>(query, key, value, output, tokens, tokens, heads, batch,
+                                          *layout, rope, scale, stream);
     }
     if (element_type == 1 && head_dim == 64) {
-        return launch<__half, 64>(query, key, value, output, tokens, heads, batch, *layout, rope,
-                                  scale, stream);
+        return launch<__half, 64>(query, key, value, output, tokens, tokens, heads, batch, *layout,
+                                  rope, scale, stream);
     }
     if (element_type == 0 && head_dim == 64) {
-        return launch<__nv_bfloat16, 64>(query, key, value, output, tokens, heads, batch, *layout,
-                                         rope, scale, stream);
+        return launch<__nv_bfloat16, 64>(query, key, value, output, tokens, tokens, heads, batch,
+                                         *layout, rope, scale, stream);
     }
     if (element_type == 1 && head_dim == 128) {
-        return launch<__half, 128>(query, key, value, output, tokens, heads, batch, *layout, rope,
-                                   scale, stream);
+        return launch<__half, 128>(query, key, value, output, tokens, tokens, heads, batch, *layout,
+                                   rope, scale, stream);
     }
     return static_cast<int>(cudaErrorInvalidValue);
 }
@@ -533,6 +534,20 @@ extern "C" int mmh3_attention(int element_type, int head_dim, const void *query,
                               const Mmh3AttentionLayout *layout, float scale, cudaStream_t stream) {
     return mmh3_attention_roped(element_type, head_dim, query, key, value, output, tokens, heads,
                                 batch, layout, scale, nullptr, 0, 0.0f, stream);
+}
+
+// The pixel refiner attends from each window to its tokens and additional global keys.
+extern "C" int mmh3_attention_f16_64_rectangular(const void *query, const void *key,
+                                                 const void *value, void *output, int query_tokens,
+                                                 int key_tokens, int heads, int batch,
+                                                 const Mmh3AttentionLayout *layout,
+                                                 cudaStream_t stream) {
+    if (query_tokens <= 0 || key_tokens <= 0 || heads <= 0 || batch <= 0 || layout->causal ||
+        (layout->heads_per_key_value > 0 && heads % layout->heads_per_key_value != 0)) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    return launch<__half, 64>(query, key, value, output, query_tokens, key_tokens, heads, batch,
+                              *layout, {nullptr, 0, 0.0f}, 0.125f, stream);
 }
 
 // The DiT's layout: q, k and v with their own token strides and heads of 128 packed contiguously.

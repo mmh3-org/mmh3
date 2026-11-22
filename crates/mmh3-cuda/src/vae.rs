@@ -148,6 +148,8 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
+pub mod dwd;
+
 pub use mmh3_core::vae::{DEFAULT_TILE_OVERLAP_MIN, DEFAULT_TILE_SIZE};
 
 const HEAD_DIM: usize = 64;
@@ -511,6 +513,89 @@ fn f16_buffer(values: &[f32]) -> Result<DeviceBuffer, Error> {
     )?)
 }
 
+/// The FP16 and ConvRot linear layers of the Sol video decoders.
+#[allow(clippy::too_many_arguments)]
+fn sol_linear(
+    tensors: &DeviceTensors,
+    name: &str,
+    input: &DeviceBuffer,
+    output: &DeviceBuffer,
+    rows: usize,
+    (quantized, scales): (&DeviceBuffer, &DeviceBuffer),
+    swiglu: bool,
+    input_quantized: bool,
+) -> Result<(), Error> {
+    let weight = tensors.get(&format!("{name}.weight"))?;
+    let bias = tensors.pointer(&format!("{name}.bias"))?;
+    let (outputs, features) = (weight.shape[0], weight.shape[1]);
+    let output_columns = if swiglu { outputs / 2 } else { outputs };
+    assert!(
+        input.bytes() >= rows * features * 2 && output.bytes() >= rows * output_columns * 2,
+        "{name}: buffers are too small"
+    );
+    if weight.dtype != DType::I8 {
+        assert!(!swiglu, "{name}: SwiGLU output needs INT8 weights");
+        // SAFETY: both buffers hold the rows, checked above, and the weight and bias come from
+        // the checkpoint.
+        unsafe {
+            cublaslt_linear(
+                LinearKind::F16,
+                input.pointer(),
+                weight.buffer.pointer(),
+                bias,
+                output.pointer(),
+                rows,
+                outputs,
+                features,
+            )?
+        };
+        return Ok(());
+    }
+    if features % CONVROT_GROUP != 0 {
+        return Err(Error::Model(format!("{name}: unsupported INT8 layer")));
+    }
+    assert!(
+        quantized.bytes() >= rows * features && scales.bytes() >= rows * 4,
+        "{name}: quantization buffers are too small"
+    );
+    let weight_scales = tensors.pointer(&format!("{name}.weight_scale"))?;
+    // SAFETY: the quantization buffers hold the rows, checked above, and the bias holds
+    // `outputs` f32 values.
+    unsafe {
+        if !input_quantized {
+            rotate_quantize_pointers(
+                input.pointer(),
+                true,
+                quantized.pointer(),
+                scales.pointer(),
+                rows,
+                features,
+            )?;
+        }
+        let output = Int8Output {
+            pointer: output.pointer(),
+            f16: true,
+            bias,
+            swiglu,
+            stride: 0,
+            column_maxima: ptr::null_mut(),
+            maxima_first_column: 0,
+        };
+        int8_pointers(
+            quantized.pointer(),
+            weight.buffer.pointer(),
+            scales.pointer(),
+            weight_scales,
+            output,
+            rows,
+            outputs,
+            features,
+            None,
+        )?;
+    }
+    Ok(())
+}
+
 impl CudaVideoDecoder {
     /// Uploads the decoder half of a video VAE checkpoint. `prefix` is prepended to every
     /// checkpoint tensor name.
@@ -736,78 +821,16 @@ impl CudaVideoDecoder {
         swiglu: bool,
         input_quantized: bool,
     ) -> Result<(), Error> {
-        let weight = self.weights()?.tensors.get(&format!("{name}.weight"))?;
-        let bias = self.weights()?.tensors.pointer(&format!("{name}.bias"))?;
-        let (outputs, features) = (weight.shape[0], weight.shape[1]);
-        let output_columns = if swiglu { outputs / 2 } else { outputs };
-        assert!(
-            input.bytes() >= rows * features * 2 && output.bytes() >= rows * output_columns * 2,
-            "{name}: buffers are too small"
-        );
-        if weight.dtype != DType::I8 {
-            assert!(!swiglu, "{name}: SwiGLU output needs INT8 weights");
-            // SAFETY: both buffers hold the rows, checked above, and the weight and bias come from
-            // the checkpoint.
-            unsafe {
-                cublaslt_linear(
-                    LinearKind::F16,
-                    input.pointer(),
-                    weight.buffer.pointer(),
-                    bias,
-                    output.pointer(),
-                    rows,
-                    outputs,
-                    features,
-                )?
-            };
-            return Ok(());
-        }
-        if features % CONVROT_GROUP != 0 {
-            return Err(Error::Model(format!("{name}: unsupported INT8 layer")));
-        }
-        assert!(
-            workspace.quantized.bytes() >= rows * features && workspace.scales.bytes() >= rows * 4,
-            "{name}: quantization buffers are too small"
-        );
-        let weight_scales = self
-            .weights()?
-            .tensors
-            .pointer(&format!("{name}.weight_scale"))?;
-        // SAFETY: the quantization buffers hold the rows, checked above, and the bias holds
-        // `outputs` f32 values.
-        unsafe {
-            if !input_quantized {
-                rotate_quantize_pointers(
-                    input.pointer(),
-                    true,
-                    workspace.quantized.pointer(),
-                    workspace.scales.pointer(),
-                    rows,
-                    features,
-                )?;
-            }
-            let output = Int8Output {
-                pointer: output.pointer(),
-                f16: true,
-                bias,
-                swiglu,
-                stride: 0,
-                column_maxima: ptr::null_mut(),
-                maxima_first_column: 0,
-            };
-            int8_pointers(
-                workspace.quantized.pointer(),
-                weight.buffer.pointer(),
-                workspace.scales.pointer(),
-                weight_scales,
-                output,
-                rows,
-                outputs,
-                features,
-                None,
-            )?;
-        }
-        Ok(())
+        sol_linear(
+            &self.weights()?.tensors,
+            name,
+            input,
+            output,
+            rows,
+            (&workspace.quantized, &workspace.scales),
+            swiglu,
+            input_quantized,
+        )
     }
 
     /// Normalizes the residual stream into `workspace.normalized`: RMSNorm, or LayerNorm when
