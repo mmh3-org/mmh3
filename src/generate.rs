@@ -5,7 +5,9 @@
 //! does with them. What they generate is therefore the same run.
 
 use crate::cli::{parse_options, split_ffmpeg_arguments};
-use crate::generation::{FLAGS, OPTIONS, Settings, sample};
+#[cfg(not(any(feature = "cuda", feature = "metal")))]
+use crate::generation::sample;
+use crate::generation::{FLAGS, OPTIONS, Settings};
 #[cfg(any(feature = "cuda", feature = "metal"))]
 use crate::models::{AUDIO_VAE_FILE, option_path, video_vae_path};
 #[cfg(any(feature = "cuda", feature = "metal"))]
@@ -20,24 +22,20 @@ use std::path::Path;
 /// `usage` is what an argument this does not understand is answered with.
 #[cfg(any(feature = "cuda", feature = "metal"))]
 pub fn run(arguments: &[String], usage: &'static str) -> Result<(), Box<dyn Error>> {
+    use crate::generation::{SampledVideo, sample_video};
     use mmh3_core::generation::FPS;
     #[cfg(feature = "cuda")]
     use mmh3_cuda::audio_vae::{CudaAudioDecoder as AudioDecoder, SAMPLE_RATE};
     #[cfg(feature = "cuda")]
-    use mmh3_cuda::vae::{
-        CudaVideoDecoder as VideoDecoder, DEFAULT_TILE_OVERLAP_MIN, DEFAULT_TILE_SIZE,
-    };
+    use mmh3_cuda::vae::dwd::CudaDwdDecoder;
     #[cfg(feature = "metal")]
     use mmh3_metal::audio_vae::{MetalAudioDecoder as AudioDecoder, SAMPLE_RATE};
-    #[cfg(feature = "metal")]
-    use mmh3_metal::vae::{
-        DEFAULT_TILE_OVERLAP_MIN, DEFAULT_TILE_SIZE, MetalVideoDecoder as VideoDecoder,
-    };
     use mmh3_output::MediaSpec;
     use std::time::Instant;
 
     let (arguments, ffmpeg_arguments) = split_ffmpeg_arguments(arguments);
-    let options = parse_options(
+    #[allow(unused_mut)]
+    let mut options = parse_options(
         arguments,
         &[OPTIONS, &["out", "audio-vae"]].concat(),
         FLAGS,
@@ -52,6 +50,26 @@ pub fn run(arguments: &[String], usage: &'static str) -> Result<(), Box<dyn Erro
         }
         crate::models::load_algorithm_cache();
     }
+    #[cfg(feature = "cuda")]
+    let dwd_path = crate::models::model_file(&options, "dwd", &["patches", "loras"])?;
+    #[cfg(feature = "cuda")]
+    let dwd_file = if let Some(path) = dwd_path.as_deref() {
+        if options.contains_key("patch") {
+            return Err("--dwd already applies the adapter as a patch".into());
+        }
+        let file = SafeTensors::open(Path::new(path))?;
+        if file
+            .get("diffusion_model.dwd_norm_out.linear.weight")
+            .is_none()
+        {
+            return Err("--dwd needs an adapter converted with tools/models/pih3_patch.py".into());
+        }
+        CudaDwdDecoder::validate(&file)?;
+        options.insert("patch", path);
+        Some(file)
+    } else {
+        None
+    };
     let video_path = Path::new(options.get("out").ok_or(usage)?).to_path_buf();
     // Where the video goes is checked before this machine's cards are lent, so that a run that
     // could not write it starts no worker.
@@ -66,7 +84,7 @@ pub fn run(arguments: &[String], usage: &'static str) -> Result<(), Box<dyn Erro
         };
         crate::output::prepare(ffmpeg_arguments, spec, &video_path)
     })?;
-    let (video, audio) = sample(&options, &settings)?;
+    let (video, audio) = sample_video(&options, &settings)?;
 
     // The audio goes to a worker on a connection of its own, since a worker finishes its share of
     // the video before this machine finishes blending its own and is idle until then.
@@ -78,87 +96,22 @@ pub fn run(arguments: &[String], usage: &'static str) -> Result<(), Box<dyn Erro
         &audio,
     );
 
-    let started = Instant::now();
-    let path = video_vae_path(&options)?;
-    let file = SafeTensors::open(Path::new(&path))?;
-    // A run with workers hands every chunk out and only puts the canvases together, so it reads
-    // the weights that made them only if one never arrives.
-    let chunks_out = settings.workers_for(CAPABILITY_DECODE_VIDEO);
-    #[allow(unused_mut)]
-    let mut decoder = match chunks_out.is_empty() {
-        true => VideoDecoder::load(&file, "", DEFAULT_TILE_SIZE, DEFAULT_TILE_OVERLAP_MIN)?,
-        false => VideoDecoder::to_assemble(&file, "", DEFAULT_TILE_SIZE, DEFAULT_TILE_OVERLAP_MIN)?,
-    };
-    #[cfg(feature = "metal")]
-    decoder.set_precision(
-        crate::metal::default_linear_precision(),
-        crate::metal::attention_precision(&options)?,
-    )?;
-    // Chunks of the decode go to whichever machines answer, and this one walks the rest while
-    // they work. A chunk that does not come back is decoded here.
-    let mut remote = crate::worker::RemoteCanvases::start(
-        crate::worker::connect_all(&chunks_out, &settings.token),
-        crate::worker::VIDEO_VAE_ROLE,
-        &video,
-        decoder.plan(&video)?.chunks,
-        DEFAULT_TILE_SIZE,
-        DEFAULT_TILE_OVERLAP_MIN,
-    );
-    if !remote.chunks().is_empty() {
-        println!("chunks {:?} decode elsewhere", remote.chunks());
+    match video {
+        SampledVideo::Latent(video) => decode_video(&options, &settings, &video, &mut output)?,
+        #[cfg(feature = "cuda")]
+        SampledVideo::Dwd(features) => {
+            let started = Instant::now();
+            let file = dwd_file.as_ref().expect("DWD output uses a DWD adapter");
+            let frames =
+                crate::resident::with_room(|| Ok(CudaDwdDecoder::load(file)?.decode(&features)?))?;
+            output.write_cuda_video(&frames)?;
+            println!(
+                "refined and submitted the video with DWD in {:.1} s",
+                started.elapsed().as_secs_f64()
+            );
+            crate::models::save_algorithm_cache();
+        }
     }
-    #[cfg(feature = "cuda")]
-    {
-        // The card this machine lends a worker of its own holds its models, and the decode makes
-        // room beside them. A canvas it took is one the workers do not send twice, so trying again
-        // asks them for those chunks once more.
-        let mut again: Option<crate::worker::RemoteCanvases> = None;
-        let mut taken = Vec::new();
-        let decoded = crate::resident::with_room(|| {
-            let decoded = decoder.decode_device_with(&video, &mut |chunk| {
-                let canvas = match again.as_mut() {
-                    Some(again) if again.chunks().contains(&chunk) => again.take(chunk)?,
-                    _ => remote.take(chunk)?,
-                };
-                if canvas.is_some() && !taken.contains(&chunk) {
-                    taken.push(chunk);
-                }
-                Ok(canvas)
-            });
-            if matches!(&decoded, Err(error) if error.is_out_of_memory()) && !taken.is_empty() {
-                again = Some(crate::worker::RemoteCanvases::start_for(
-                    crate::worker::connect_all(&chunks_out, &settings.token),
-                    crate::worker::VIDEO_VAE_ROLE,
-                    &video,
-                    taken.clone(),
-                    DEFAULT_TILE_SIZE,
-                    DEFAULT_TILE_OVERLAP_MIN,
-                ));
-            }
-            Ok(decoded?)
-        })?;
-        drop(decoder);
-        output.write_cuda_video(&decoded)?;
-        // The sampling saved what it chose, and the decode has chosen for shapes of its own since.
-        crate::models::save_algorithm_cache();
-    }
-    #[cfg(feature = "metal")]
-    if output.streams_metal_video() {
-        decoder.decode_stream_with(&video, &mut |chunk| remote.take(chunk), |frames| {
-            output
-                .write_metal_video_chunk(frames)
-                .map_err(|e| mmh3_metal::Error::new(e.to_string()))
-        })?;
-        drop(decoder);
-    } else {
-        let decoded = decoder.decode_device_with(&video, &mut |chunk| remote.take(chunk))?;
-        drop(decoder);
-        output.write_metal_video(&decoded)?;
-    }
-    println!(
-        "decoded and submitted the video with {path} in {:.1} s",
-        started.elapsed().as_secs_f64()
-    );
     let started = Instant::now();
     #[cfg(feature = "cuda")]
     let remote_waveform = remote_audio.take()?;
@@ -189,6 +142,107 @@ pub fn run(arguments: &[String], usage: &'static str) -> Result<(), Box<dyn Erro
     println!(
         "wrote {} in {:.1} s",
         video_path.display(),
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+#[cfg(any(feature = "cuda", feature = "metal"))]
+fn decode_video(
+    options: &std::collections::HashMap<&str, &str>,
+    settings: &Settings,
+    video: &mmh3_core::tensor::Tensor,
+    output: &mut crate::output::PreparedOutput,
+) -> Result<(), Box<dyn Error>> {
+    #[cfg(feature = "cuda")]
+    use mmh3_cuda::vae::{
+        CudaVideoDecoder as VideoDecoder, DEFAULT_TILE_OVERLAP_MIN, DEFAULT_TILE_SIZE,
+    };
+    #[cfg(feature = "metal")]
+    use mmh3_metal::vae::{
+        DEFAULT_TILE_OVERLAP_MIN, DEFAULT_TILE_SIZE, MetalVideoDecoder as VideoDecoder,
+    };
+    use std::time::Instant;
+
+    let started = Instant::now();
+    let path = video_vae_path(options)?;
+    let file = SafeTensors::open(Path::new(&path))?;
+    // A run with workers hands every chunk out and only puts the canvases together, so it reads
+    // the weights that made them only if one never arrives.
+    let chunks_out = settings.workers_for(CAPABILITY_DECODE_VIDEO);
+    #[allow(unused_mut)]
+    let mut decoder = match chunks_out.is_empty() {
+        true => VideoDecoder::load(&file, "", DEFAULT_TILE_SIZE, DEFAULT_TILE_OVERLAP_MIN)?,
+        false => VideoDecoder::to_assemble(&file, "", DEFAULT_TILE_SIZE, DEFAULT_TILE_OVERLAP_MIN)?,
+    };
+    #[cfg(feature = "metal")]
+    decoder.set_precision(
+        crate::metal::default_linear_precision(),
+        crate::metal::attention_precision(options)?,
+    )?;
+    // Chunks of the decode go to whichever machines answer, and this one walks the rest while
+    // they work. A chunk that does not come back is decoded here.
+    let mut remote = crate::worker::RemoteCanvases::start(
+        crate::worker::connect_all(&chunks_out, &settings.token),
+        crate::worker::VIDEO_VAE_ROLE,
+        video,
+        decoder.plan(video)?.chunks,
+        DEFAULT_TILE_SIZE,
+        DEFAULT_TILE_OVERLAP_MIN,
+    );
+    if !remote.chunks().is_empty() {
+        println!("chunks {:?} decode elsewhere", remote.chunks());
+    }
+    #[cfg(feature = "cuda")]
+    {
+        // The card this machine lends a worker of its own holds its models, and the decode makes
+        // room beside them. A canvas it took is one the workers do not send twice, so trying again
+        // asks them for those chunks once more.
+        let mut again: Option<crate::worker::RemoteCanvases> = None;
+        let mut taken = Vec::new();
+        let decoded = crate::resident::with_room(|| {
+            let decoded = decoder.decode_device_with(video, &mut |chunk| {
+                let canvas = match again.as_mut() {
+                    Some(again) if again.chunks().contains(&chunk) => again.take(chunk)?,
+                    _ => remote.take(chunk)?,
+                };
+                if canvas.is_some() && !taken.contains(&chunk) {
+                    taken.push(chunk);
+                }
+                Ok(canvas)
+            });
+            if matches!(&decoded, Err(error) if error.is_out_of_memory()) && !taken.is_empty() {
+                again = Some(crate::worker::RemoteCanvases::start_for(
+                    crate::worker::connect_all(&chunks_out, &settings.token),
+                    crate::worker::VIDEO_VAE_ROLE,
+                    video,
+                    taken.clone(),
+                    DEFAULT_TILE_SIZE,
+                    DEFAULT_TILE_OVERLAP_MIN,
+                ));
+            }
+            Ok(decoded?)
+        })?;
+        drop(decoder);
+        output.write_cuda_video(&decoded)?;
+        // The sampling saved what it chose, and the decode has chosen for shapes of its own since.
+        crate::models::save_algorithm_cache();
+    }
+    #[cfg(feature = "metal")]
+    if output.streams_metal_video() {
+        decoder.decode_stream_with(video, &mut |chunk| remote.take(chunk), |frames| {
+            output
+                .write_metal_video_chunk(frames)
+                .map_err(|e| mmh3_metal::Error::new(e.to_string()))
+        })?;
+        drop(decoder);
+    } else {
+        let decoded = decoder.decode_device_with(video, &mut |chunk| remote.take(chunk))?;
+        drop(decoder);
+        output.write_metal_video(&decoded)?;
+    }
+    println!(
+        "decoded and submitted the video with {path} in {:.1} s",
         started.elapsed().as_secs_f64()
     );
     Ok(())

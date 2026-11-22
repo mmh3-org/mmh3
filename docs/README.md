@@ -23,6 +23,7 @@ Generating in fewer steps:
 - [lightx2v Turbo LoRA](lightx2v-turbo.md): a 4-step LoRA.
 - [TaoMate-H3](taomate.md): a 3-step LoRA.
 - [PDMD](pdmd.md): a 2-step LoRA.
+- [pi-H3](pih3.md): 2- or 4-step adapters with video VAE output or DWD on a single CUDA GPU.
 - [DMAD](dmad.md): a 4-step LoRA, with the re-noise step rule.
 
 Going faster, and looking underneath:

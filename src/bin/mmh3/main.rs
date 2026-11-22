@@ -12,9 +12,9 @@ const USAGE: &str = "usage:
   mmh3 generate (--prompt TEXT | --prompt-file FILE | --context <text.safetensors>) --out <video.mp4|video.webm> [--models DIR]
                 [--width N] [--height N] [--frames N] [--first-frame FILE] [--last-frame FILE] [--reference FILE]...
                 [--reference-audio FILE]... [--reference-video FILE]...
-                [--steps N | --schedule taomate] [--sampler euler|renoise] [--draft-steps N] [--seed N] [--shift-video X] [--shift-audio X]
+                [--schedule uniform|taomate|pih3] [--steps N] [--sampler euler|renoise] [--draft-steps N] [--seed N] [--shift-video X] [--shift-audio X]
                 [--dit FILE] [--video-vae FILE] [--audio-vae FILE] [--text-encoder FILE] [--latent-upscaler FILE]
-                [--patch FILE] [--lora FILE] [--lora-strength X] [--lora-mode adapter|merge] [--attention dense|sol|vsa] [--attention-precision bf16|int8-fp8] [--linear-precision int8|nvfp4] [--sparse-tau X] [--sparse-start X] [--vsa-sparsity X]
+                [--patch FILE | --dwd FILE] [--lora FILE] [--lora-strength X] [--lora-mode adapter|merge] [--attention dense|sol|vsa] [--attention-precision bf16|int8-fp8] [--linear-precision int8|nvfp4] [--sparse-tau X] [--sparse-start X] [--vsa-sparsity X]
                 [--devices CARD,CARD...] [--worker HOST[:PORT] [--worker-units UNITS]]...
                 [--local-worker [--worker-units UNITS]] [--token FILE] [--consistent] [--vram-budget GB]
                 [--ffmpeg [FFMPEG_ARGUMENTS...]]
@@ -36,6 +36,8 @@ of the options, and switches the default DiT to diffusion_models/minimax_h3_ref2
 FLAC, MP3, AAC, ALAC, Ogg Vorbis, MP4 or Matroska file, resampled to the audio VAE's 32 kHz.
 --reference-video takes an H.264 MP4 the prompt refers to as <Video 1>, <Video 2> and so on. Its frames are decoded
 with NVDEC, and its soundtrack becomes the <Audio j> that precedes it.
+--dwd applies a converted pi-H3 adapter and runs its pixel refiner on one local CUDA device.
+Use --schedule pih3 and the step count of the adapter.
 MP4 uses NVENC on CUDA or VideoToolbox on Metal for H.264 video, with built-in AAC audio.
 WebM uses built-in VP9 + Opus.
 --ffmpeg overrides native output and consumes all remaining arguments.

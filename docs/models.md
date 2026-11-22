@@ -40,9 +40,28 @@ downloads into another directory.
 `make download-models LORA=pdmd`, `LORA=dmad`, `LORA=turbo` or `LORA=taomate` passes `--pdmd`,
 `--dmad`, `--lightx2v-turbo` or `--taomate` to the script.
 
-Patches, such as the FastH3 patch, go into `patches` of the models directory. `--patch` and `--lora`
-take a path, or a file name that mmh3 looks up in `patches` and then `loras` of the models directory
-for `--patch`, and in `loras` for `--lora`, so patches kept with ComfyUI's LoRAs work too.
+### pi-H3
+
+`--pih3 2|4` and `--pih3-dwd 2|4` select the video VAE and CUDA DWD variants. The downloader
+places the converted patch in `patches`. [yniw/MiniMax-H3-mmh3](https://huggingface.co/yniw/MiniMax-H3-mmh3)
+
+| Variant | Patch |
+| --- | --- |
+| Video VAE | `minimax_h3_pih3_2step.safetensors` or `minimax_h3_pih3_4step.safetensors` |
+| DWD | `minimax_h3_pih3_2step_dwd.safetensors` or `minimax_h3_pih3_4step_dwd.safetensors` |
+
+Each video VAE patch takes about 0.5 GB and each DWD patch takes about 2.2 GB.
+
+`make download-models LORA=pih3` and `make download-models LORA=pih3-dwd` default to two steps.
+Set `PIH3_STEPS=4` to select the 4-step adapter. Both presets skip the FastH3 patch. The DWD preset
+also sets `--video-vae none` for text-to-video. To add first- or last-frame conditioning, download
+the video VAE with `tools/download-models.sh --models DIR --no-fasth3`. See [pi-H3](pih3.md).
+
+### Model lookup
+
+Patches go in `patches` of the models directory. `--patch`, `--dwd` and `--lora` each accept a path
+or a file name. mmh3 looks up file names in `patches` and then `loras` for `--patch` and `--dwd`.
+For `--lora`, it looks up the file name in `loras`.
 
 `generate` decodes with the INT8 video VAE when the models directory has it, and with the FP16
 one otherwise. The INT8 one is faster, and on FastH3 videos its pixels are about 61 dB PSNR from the

@@ -110,6 +110,7 @@ const FILE_OPTIONS: &[&str] = &[
 /// the directories it is looked for in, in order.
 const MODEL_FILE_OPTIONS: &[(&str, &[&str])] = &[
     ("patch", &["patches", "loras"]),
+    ("dwd", &["patches", "loras"]),
     ("lora", &["loras"]),
     ("latent-upscaler", &["latent_upscale_models"]),
 ];
@@ -933,6 +934,10 @@ mod tests {
         assert!(matches!(
             field_kind("lora"),
             Ok(FieldKind::ModelFile(["loras"]))
+        ));
+        assert!(matches!(
+            field_kind("dwd"),
+            Ok(FieldKind::ModelFile(["patches", "loras"]))
         ));
         for name in MACHINE_OPTIONS
             .iter()

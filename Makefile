@@ -33,8 +33,19 @@ BACKEND_OPTIONS = --width 672 --height 384 --frames 73
 else
 BACKEND_OPTIONS = --attention-precision int8-fp8
 endif
-# A few-step LoRA in place of the FastH3 patch, with the settings on its page in docs.
+# A few-step adapter in place of the FastH3 patch, with the settings on its page in docs.
 LORA =
+PIH3_STEPS = 2
+ifneq ($(filter pih3 pih3-dwd,$(LORA)),)
+ifneq ($(PIH3_STEPS),2)
+ifneq ($(PIH3_STEPS),4)
+$(error PIH3_STEPS must be 2 or 4)
+endif
+endif
+endif
+PIH3_OPTIONS = --schedule pih3 --steps $(PIH3_STEPS) --attention sol --sparse-start 0
+LORA_OPTIONS_pih3 = $(PIH3_OPTIONS) --patch minimax_h3_pih3_$(PIH3_STEPS)step.safetensors
+LORA_OPTIONS_pih3-dwd = $(PIH3_OPTIONS) --dwd minimax_h3_pih3_$(PIH3_STEPS)step_dwd.safetensors
 LORA_OPTIONS_pdmd = --steps 2 --shift-video 12 --shift-audio 3 --attention sol --sparse-start 0 \
 	--lora minimax_h3_pdmd_2step_lora_rank128_bf16.safetensors
 LORA_OPTIONS_turbo = --steps 4 --shift-video 6 --shift-audio 3 --attention sol --sparse-start 0 \
@@ -47,6 +58,8 @@ LORA_DOWNLOAD_pdmd = --pdmd
 LORA_DOWNLOAD_turbo = --lightx2v-turbo
 LORA_DOWNLOAD_taomate = --taomate
 LORA_DOWNLOAD_dmad = --dmad
+LORA_DOWNLOAD_pih3 = --no-fasth3 --pih3 $(PIH3_STEPS)
+LORA_DOWNLOAD_pih3-dwd = --no-fasth3 --video-vae none --pih3-dwd $(PIH3_STEPS)
 ifeq ($(LORA),)
 # FastVideo's FastH3 in four steps, as a patch on the base DiT, with VSA.
 GENERATE_OPTIONS = --steps 4 $(BACKEND_OPTIONS) \
@@ -54,7 +67,7 @@ GENERATE_OPTIONS = --steps 4 $(BACKEND_OPTIONS) \
 else ifneq ($(LORA_OPTIONS_$(LORA)),)
 GENERATE_OPTIONS = $(BACKEND_OPTIONS) $(LORA_OPTIONS_$(LORA))
 else
-$(error LORA must be pdmd, dmad, turbo or taomate, not $(LORA))
+$(error LORA must be pdmd, dmad, turbo, taomate, pih3 or pih3-dwd, not $(LORA))
 endif
 
 .PHONY: build

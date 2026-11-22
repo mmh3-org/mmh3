@@ -53,6 +53,7 @@ pub const OPTIONS: &[&str] = &[
     "video-vae",
     "audio-vae",
     "patch",
+    "dwd",
     "lora",
     "lora-strength",
     "lora-mode",
@@ -280,6 +281,12 @@ impl Settings {
             );
         }
         let cards = Self::cards(options)?;
+        if options.contains_key("dwd") {
+            if !cfg!(feature = "cuda") || cards.len() != 1 || !borrowed.is_empty() {
+                return Err("--dwd requires one local CUDA device and no worker options".into());
+            }
+            return Ok((Vec::new(), cards));
+        }
         if cards.is_empty() && lent == 1 {
             return Err(
                 "this build runs nothing of its own, so it has no --local-worker to give".into(),
@@ -417,8 +424,15 @@ impl Settings {
                 }
                 Schedule::taomate(shift_video, shift_audio)
             }
+            "pih3" => {
+                let steps = option_number(options, "steps", 2)?;
+                Schedule::pi_h3(steps, shift_video, shift_audio)
+                    .ok_or("--schedule pih3 needs --steps 2 or 4")?
+            }
             other => {
-                return Err(format!("--schedule must be uniform or taomate, not {other}").into());
+                return Err(
+                    format!("--schedule must be uniform, taomate or pih3, not {other}").into(),
+                );
             }
         };
         let sampler = match options.get("sampler").copied().unwrap_or("euler") {
@@ -571,12 +585,32 @@ impl Settings {
     }
 }
 
-/// Encodes the prompt, or reads the text states of `--context`, and runs the DiT's steps
-/// from the seed's noise. Returns the final video and audio latents.
+pub(crate) enum SampledVideo {
+    Latent(Tensor),
+    #[cfg(feature = "cuda")]
+    Dwd(mmh3_cuda::vae::dwd::DwdFeatures),
+}
+
+/// Samples the final video and audio latents for the latent tool and the CPU leader.
 pub fn sample(
     options: &HashMap<&str, &str>,
     settings: &Settings,
 ) -> Result<(Tensor, Tensor), Box<dyn Error>> {
+    if options.contains_key("dwd") {
+        return Err("--dwd is for mmh3 generate".into());
+    }
+    match sample_video(options, settings)? {
+        (SampledVideo::Latent(video), audio) => Ok((video, audio)),
+        #[cfg(feature = "cuda")]
+        (SampledVideo::Dwd(_), _) => unreachable!("a latent run cannot request DWD"),
+    }
+}
+
+/// Encodes the prompt and samples audio and either video latents or final DWD features.
+pub(crate) fn sample_video(
+    options: &HashMap<&str, &str>,
+    settings: &Settings,
+) -> Result<(SampledVideo, Tensor), Box<dyn Error>> {
     use mmh3_core::dit::inputs::{DitInputs, Keyframe, Reference};
     use mmh3_core::dit::sampler::{euler_step, renoise_step};
     use mmh3_core::generation::FPS;
@@ -634,6 +668,20 @@ pub fn sample(
     let has_references = !(settings.references.is_empty()
         && settings.sounds.is_empty()
         && settings.clips.is_empty());
+    let dwd = options.contains_key("dwd");
+    if dwd
+        && (has_references
+            || settings.draft_steps > 0
+            || settings.sampler != Sampler::Euler
+            || options.get("schedule") != Some(&"pih3")
+            || options.get("attention") == Some(&"vsa"))
+    {
+        return Err(
+            "--dwd needs the pi-H3 Euler schedule and FL2VA, with no draft steps or VSA".into(),
+        );
+    }
+    #[cfg(feature = "cuda")]
+    let mut video_features = None;
     let dit_file = if has_references {
         REFERENCE_DIT_FILE
     } else {
@@ -981,7 +1029,14 @@ pub fn sample(
                             let dit = dit
                                 .as_ref()
                                 .ok_or("a step to take here and no DiT to take it")?;
-                            dit.forward(&inputs, &[], step_sparse.as_ref())?
+                            if dwd && step + 1 == steps {
+                                let (outputs, features) =
+                                    dit.forward_dwd(&inputs, step_sparse.as_ref())?;
+                                video_features = Some(features);
+                                outputs
+                            } else {
+                                dit.forward(&inputs, &[], step_sparse.as_ref())?
+                            }
                         };
                         #[cfg(feature = "metal")]
                         let outputs = {
@@ -1038,12 +1093,15 @@ pub fn sample(
                     schedule.audio[step + 1],
                 );
             } else {
-                euler_step(
-                    &mut video.data,
-                    &velocity.video,
-                    schedule.video[step],
-                    schedule.video[step + 1],
-                );
+                // DWD replaces the last video velocity with features for its pixel refiner.
+                if !velocity.video.is_empty() {
+                    euler_step(
+                        &mut video.data,
+                        &velocity.video,
+                        schedule.video[step],
+                        schedule.video[step + 1],
+                    );
+                }
                 euler_step(
                     &mut audio.data,
                     &velocity.audio,
@@ -1084,7 +1142,11 @@ pub fn sample(
     }
     #[cfg(feature = "cuda")]
     save_algorithm_cache();
-    Ok((video, audio))
+    #[cfg(feature = "cuda")]
+    if let Some(features) = video_features {
+        return Ok((SampledVideo::Dwd(features), audio));
+    }
+    Ok((SampledVideo::Latent(video), audio))
 }
 
 /// The clean latent of the last draft step at `height × width`: through the latent upscaler of

@@ -51,6 +51,28 @@ impl Schedule {
         Self::retained(50, &[0, 16, 33, 49], shift_video, shift_audio)
     }
 
+    /// The pi-H3 grid starts below sigma one and uses a shorter final interval before shifting.
+    pub fn pi_h3(steps: usize, shift_video: f32, shift_audio: f32) -> Option<Self> {
+        let max_raw_sigma = match steps {
+            2 => 0.93,
+            4 => 0.96,
+            _ => return None,
+        };
+        let stride = max_raw_sigma / (steps as f32 - 1.0 + 0.6);
+        let base = (0..steps)
+            .map(|index| max_raw_sigma - index as f32 * stride)
+            .chain(std::iter::once(0.0));
+        let shifted = |shift| {
+            base.clone()
+                .map(|sigma| time_shift_sigma(sigma, 1.0, shift))
+                .collect()
+        };
+        Some(Self {
+            video: shifted(shift_video),
+            audio: shifted(shift_audio),
+        })
+    }
+
     pub fn steps(&self) -> usize {
         self.video.len() - 1
     }
@@ -117,6 +139,29 @@ mod tests {
         for (actual, expected) in schedule.audio.iter().zip(expected_audio) {
             assert!((actual - expected).abs() < 1e-5, "{:?}", schedule.audio);
         }
+    }
+
+    #[test]
+    fn matches_the_pi_h3_schedules() {
+        for (video, audio) in [
+            (
+                &[0.993767, 0.865340, 0.0][..],
+                &[0.975524, 0.616348, 0.0][..],
+            ),
+            (
+                &[0.996540, 0.964451, 0.899297, 0.695652, 0.0][..],
+                &[0.986301, 0.871508, 0.690647, 0.363636, 0.0][..],
+            ),
+        ] {
+            let schedule = Schedule::pi_h3(video.len() - 1, 12.0, 3.0).unwrap();
+            for (actual, expected) in [(&schedule.video, video), (&schedule.audio, audio)] {
+                assert_eq!(actual.len(), expected.len());
+                for (&actual, &expected) in actual.iter().zip(expected) {
+                    assert!((actual - expected).abs() < 1e-6, "{actual} vs {expected}");
+                }
+            }
+        }
+        assert!(Schedule::pi_h3(3, 12.0, 3.0).is_none());
     }
 
     #[test]

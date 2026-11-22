@@ -60,10 +60,10 @@ def block_diagonal(matrices):
     return result
 
 
-def block_factors(source):
-    """{(group, index): {layer: {"A": name, "B": name}}} of the LoRA tensors of `source`."""
+def block_factors(names):
+    """{(group, index): {layer: {"A": name, "B": name}}} of the named LoRA tensors."""
     blocks = {}
-    for name in source.header:
+    for name in names:
         match = NAME.fullmatch(name)
         if match is None:
             sys.exit(f"{name}: not a LoRA tensor of the transformer blocks")
@@ -103,7 +103,7 @@ def convert(source, scale, out, max_rank, energy, metadata):
     ranks = []
     energies = []
     lost = []
-    for (group, index), layers in sorted(block_factors(source).items()):
+    for (group, index), layers in sorted(block_factors(source.header).items()):
         block = f"{BLOCKS[group]}.{index}"
         for name, lora_b, lora_a in block_updates(source, block, layers):
             left, singular, right = update_svd(lora_b, lora_a, scale)

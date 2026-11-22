@@ -20,6 +20,7 @@ use crate::nvfp4::{
 };
 use crate::shard::{self, Region, ShardContext, VelocityRows};
 use crate::streaming::{Pass, Stream};
+use crate::vae::dwd::{DwdFeatures, mmh3_dwd_adaln};
 use crate::veda::{VedaPass, VedaWeights};
 use crate::{CudaError, DeviceBuffer, check, copy_device};
 use mmh3_core::dit::config::DitConfig;
@@ -362,6 +363,7 @@ pub struct DitOutputs {
     pub routed_fraction: Option<f64>,
     /// This rank's rows, when the step was shared out. The velocity above is then empty.
     pub part: Option<VelocityRows>,
+    dwd: Option<DwdFeatures>,
 }
 
 /// Block-sparse attention for the blocks of one call.
@@ -2368,8 +2370,32 @@ impl CudaDit {
         capture: &[usize],
         sparse: Option<&SparseAttention>,
     ) -> Result<DitOutputs, Error> {
+        self.forward_whole(inputs, capture, sparse, false)
+    }
+
+    /// The last pi-H3 step returns audio velocity and the target video features for DWD.
+    pub fn forward_dwd(
+        &self,
+        inputs: &DitInputs,
+        sparse: Option<&SparseAttention>,
+    ) -> Result<(DitOutputs, DwdFeatures), Error> {
+        let mut outputs = self.forward_whole(inputs, &[], sparse, true)?;
+        let features = outputs
+            .dwd
+            .take()
+            .expect("a DWD step returns video features");
+        Ok((outputs, features))
+    }
+
+    fn forward_whole(
+        &self,
+        inputs: &DitInputs,
+        capture: &[usize],
+        sparse: Option<&SparseAttention>,
+        dwd: bool,
+    ) -> Result<DitOutputs, Error> {
         loop {
-            match self.run(inputs, capture, sparse, None) {
+            match self.run(inputs, capture, sparse, None, dwd) {
                 Err(error) if error.is_out_of_memory() && self.make_room()? => continue,
                 result => return result,
             }
@@ -2405,7 +2431,7 @@ impl CudaDit {
                 exchange: &mut watched,
                 timing: Default::default(),
             };
-            let result = self.run(inputs, &[], sparse, Some(&mut attempt));
+            let result = self.run(inputs, &[], sparse, Some(&mut attempt), false);
             let timing = attempt.timing;
             context.timing.gather += timing.gather;
             context.timing.barrier += timing.barrier;
@@ -2430,6 +2456,7 @@ impl CudaDit {
         capture: &[usize],
         sparse: Option<&SparseAttention>,
         mut context: Option<&mut ShardContext<'_>>,
+        dwd: bool,
     ) -> Result<DitOutputs, Error> {
         let config = &self.config;
         let hidden = config.hidden;
@@ -2538,6 +2565,11 @@ impl CudaDit {
             _ => None,
         };
         let plan = vsa_sparsity.map(|_| VsaPlan::for_layout(&layout));
+        if dwd && plan.is_some() {
+            return Err(Error::Model(
+                "DWD requires the video rows in canvas order".into(),
+            ));
+        }
         let quantized_dense =
             self.attention_precision == AttentionPrecision::Int8Fp8 && method.is_none();
 
@@ -2697,7 +2729,8 @@ impl CudaDit {
             video_rows = plan.reorder_video(&video_rows, config.video_patch_features());
         }
         let angles = DeviceBuffer::from_f32(&angles)?;
-        let time_embedding = DeviceBuffer::from_f32(&timesteps.time_embedding(&self.adaln_table))?;
+        let time_values = timesteps.time_embedding(&self.adaln_table);
+        let time_embedding = DeviceBuffer::from_f32(&time_values)?;
 
         // The text rows sit at the start of the sequence, so rank 0 refines them and no other rank
         // holds any of them.
@@ -2876,6 +2909,52 @@ impl CudaDit {
         if let Some(modulation) = pending {
             self.add_pending(workspace, rows.len(), modulation, &block_rows)?;
         }
+        let dwd = if dwd {
+            let rank = self.adaln_table.shape[1];
+            let start = timesteps.video * rank;
+            let dwd_time: Vec<f32> = time_values[start..start + rank]
+                .iter()
+                .map(|&t| t / (1.0 + (-t).exp()))
+                .collect();
+            let weight = self
+                .tensors()
+                .get("dwd_norm_out.linear.weight")?
+                .shape
+                .clone();
+            let bias = self
+                .tensors()
+                .get("dwd_norm_out.linear.bias")?
+                .shape
+                .clone();
+            if weight != [2 * hidden, rank] || bias != [2 * hidden] {
+                return Err(Error::Model("DWD AdaLN does not match the DiT".into()));
+            }
+            let table = DeviceBuffer::new(2 * hidden * 4)?;
+            self.modulation(
+                "dwd_norm_out.linear",
+                &DeviceBuffer::from_f32(&dwd_time)?,
+                1,
+                &table,
+            )?;
+            let values = DeviceBuffer::new(video.len() * hidden * 2)?;
+            // SAFETY: the whole step has every video row. DWD gets only those rows, in raster
+            // order, and its separate AdaLN table contains scale and shift for their timestep.
+            check(unsafe {
+                mmh3_dwd_adaln(
+                    workspace.residual.pointer_at(video.start * hidden * 4),
+                    table.pointer(),
+                    values.pointer(),
+                    video.len() as c_int,
+                    hidden as c_int,
+                )
+            })?;
+            Some(DwdFeatures {
+                values,
+                grid: [video_shape[1], video_shape[2] / 2, video_shape[3] / 2],
+            })
+        } else {
+            None
+        };
 
         let final_modulation = DeviceBuffer::new(steps * FINAL_CHUNKS * hidden * 4)?;
         self.modulation(
@@ -2917,14 +2996,16 @@ impl CudaDit {
             Ok(output.to_f32()?)
         };
         let mut video_velocity = Vec::new();
-        for (layer, weight) in self.video_outputs(inputs.sigma) {
-            let projected = project(video, &layer, config.video_patch_features())?;
-            match video_velocity.is_empty() {
-                true if weight == 1.0 => video_velocity = projected,
-                true => video_velocity = projected.iter().map(|value| weight * value).collect(),
-                false => {
-                    for (sum, value) in video_velocity.iter_mut().zip(projected) {
-                        *sum += weight * value;
+        if dwd.is_none() {
+            for (layer, weight) in self.video_outputs(inputs.sigma) {
+                let projected = project(video, &layer, config.video_patch_features())?;
+                match video_velocity.is_empty() {
+                    true if weight == 1.0 => video_velocity = projected,
+                    true => video_velocity = projected.iter().map(|value| weight * value).collect(),
+                    false => {
+                        for (sum, value) in video_velocity.iter_mut().zip(projected) {
+                            *sum += weight * value;
+                        }
                     }
                 }
             }
@@ -2943,6 +3024,7 @@ impl CudaDit {
                     video: video_velocity,
                     audio: audio_velocity,
                 }),
+                dwd: None,
             });
         }
         if let Some(plan) = &plan {
@@ -2950,10 +3032,14 @@ impl CudaDit {
         }
         Ok(DitOutputs {
             blocks,
-            video: unpatchify_video(&video_velocity, video_shape)
-                .into_iter()
-                .map(|value| -value)
-                .collect(),
+            video: if dwd.is_some() {
+                Vec::new()
+            } else {
+                unpatchify_video(&video_velocity, video_shape)
+                    .into_iter()
+                    .map(|value| -value)
+                    .collect()
+            },
             audio: unpack_audio(&audio_velocity, &inputs.audio.shape)
                 .into_iter()
                 .map(|value| -value)
@@ -2964,6 +3050,7 @@ impl CudaDit {
                 _ => None,
             },
             part: None,
+            dwd,
         })
     }
 
@@ -2984,6 +3071,7 @@ impl CudaDit {
             audio: velocity.audio,
             routed_fraction: None,
             part: None,
+            dwd: None,
         })
     }
 }
