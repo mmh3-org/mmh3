@@ -5,10 +5,10 @@ set -euo pipefail
 
 usage() {
   cat <<EOF
-usage: $0 [--video-vae int8|fp16] [--ref2va | --no-ref2va] [--fasth3 | --no-fasth3]
+usage: $0 [--video-vae int8|fp16|none] [--ref2va | --no-ref2va] [--fasth3 | --no-fasth3]
        [--lightx2v-turbo | --no-lightx2v-turbo] [--taomate | --no-taomate] [--pdmd | --no-pdmd]
        [--dmad | --no-dmad] [--veda | --no-veda] [--latent-upscaler | --no-latent-upscaler]
-       [--image | --no-image] [--models DIR]
+       [--pih3 2|4] [--pih3-dwd 2|4] [--image | --no-image] [--models DIR]
 
 Downloads the checkpoints mmh3 loads from Hugging Face with the Hugging Face CLI (hf), or with curl
 when hf is not installed. curl sends HF_TOKEN when it is set. By default it downloads the ones make
@@ -18,6 +18,7 @@ VSA-DataFree patch.
   --video-vae int8     The INT8 ConvRot video VAE from yniw/MiniMax-H3-mmh3 (default).
   --video-vae fp16     The FP16 video VAE from Comfy-Org/MiniMax-H3 instead. The DiT and the text
                        encoder are INT8 ConvRot either way.
+  --video-vae none     Skip the video VAE download for text-to-video with DWD.
   --ref2va             The INT8 ConvRot ref2va DiT from Comfy-Org/MiniMax-H3 and the 768p 8-step
                        Ref2VA Turbo LoRA from lightx2v/Minimax-h3-Turbo, into loras.
   --no-ref2va          No ref2va DiT or LoRA (default).
@@ -32,6 +33,8 @@ VSA-DataFree patch.
   --no-pdmd            No PDMD LoRA (default).
   --dmad               The 4-step DMAD LoRA from yniw/MiniMax-H3-mmh3, into loras.
   --no-dmad            No DMAD LoRA (default).
+  --pih3 2|4           The converted pi-H3 patch for video VAE output from yniw/MiniMax-H3-mmh3.
+  --pih3-dwd 2|4       The converted pi-H3 DWD patch for CUDA from yniw/MiniMax-H3-mmh3.
   --veda               Veda's sparse attention predictor from
                        Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview, into veda.
   --no-veda            No Veda predictor (default).
@@ -57,6 +60,8 @@ turbo=0
 taomate=0
 pdmd=0
 dmad=0
+pih3_steps=
+pih3_dwd_steps=
 veda=0
 latent_upscaler=0
 image=0
@@ -65,7 +70,7 @@ models=$(cd "$(dirname "$0")/.." && pwd)/models
 while [[ $# -gt 0 ]]; do
   case $1 in
     --video-vae)
-      [[ $# -ge 2 ]] || fail "--video-vae needs int8 or fp16"
+      [[ $# -ge 2 ]] || fail "--video-vae needs int8, fp16 or none"
       video_vae=$2
       shift
       ;;
@@ -81,6 +86,15 @@ while [[ $# -gt 0 ]]; do
     --no-pdmd) pdmd=0 ;;
     --dmad) dmad=1 ;;
     --no-dmad) dmad=0 ;;
+    --pih3 | --pih3-dwd)
+      [[ $# -ge 2 && ( $2 == 2 || $2 == 4 ) ]] || fail "$1 needs 2 or 4"
+      if [[ $1 == --pih3 ]]; then
+        pih3_steps=$2
+      else
+        pih3_dwd_steps=$2
+      fi
+      shift
+      ;;
     --veda) veda=1 ;;
     --no-veda) veda=0 ;;
     --latent-upscaler) latent_upscaler=1 ;;
@@ -102,8 +116,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 case $video_vae in
-  int8 | fp16) ;;
-  *) fail "--video-vae must be int8 or fp16, not $video_vae" ;;
+  int8 | fp16 | none) ;;
+  *) fail "--video-vae must be int8, fp16 or none, not $video_vae" ;;
 esac
 
 # NOTE: Without hf, curl resumes each file from DEST/FILE.incomplete and renames it when the
@@ -170,6 +184,12 @@ if [[ $pdmd == 1 ]]; then
 fi
 if [[ $dmad == 1 ]]; then
   mmh3_files+=(loras/minimax_h3_dmad_4step_full_critic_rank128_bf16.safetensors)
+fi
+if [[ -n $pih3_steps ]]; then
+  mmh3_files+=("patches/minimax_h3_pih3_${pih3_steps}step.safetensors")
+fi
+if [[ -n $pih3_dwd_steps ]]; then
+  mmh3_files+=("patches/minimax_h3_pih3_${pih3_dwd_steps}step_dwd.safetensors")
 fi
 if [[ ${#mmh3_files[@]} -gt 0 ]]; then
   download yniw/MiniMax-H3-mmh3 "$models" "${mmh3_files[@]}"
